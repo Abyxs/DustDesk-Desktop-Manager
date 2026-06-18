@@ -172,7 +172,7 @@ public sealed class MainForm : Form
             _resizeFilter = null;
         }
         UnregisterHotKey(Handle, MainWindowHotKeyId);
-        foreach (var icon in _menuIcons.Values)
+        foreach (var icon in _menuIcons.Values.ToArray())
         {
             icon.Dispose();
         }
@@ -910,7 +910,7 @@ public sealed class MainForm : Form
     private void ShowQuickSearch()
     {
         FlushNote();
-        using var form = new QuickSearchForm(BuildQuickSearchEntries())
+        using var form = new QuickSearchForm(BuildQuickSearchEntries(), SearchEverythingEntries)
         {
             Icon = Icon,
             StartPosition = FormStartPosition.CenterParent
@@ -922,7 +922,7 @@ public sealed class MainForm : Form
     {
         if (_desktopSearchWidget is null || _desktopSearchWidget.IsDisposed)
         {
-            _desktopSearchWidget = new DesktopSearchWidgetForm(BuildQuickSearchEntries, SaveDesktopSearchPlacement, () => _config.DesktopSearchWidgetTransparent);
+            _desktopSearchWidget = new DesktopSearchWidgetForm(BuildQuickSearchEntries, SearchEverythingEntries, SaveDesktopSearchPlacement, () => _config.DesktopSearchWidgetTransparent);
             _desktopSearchWidget.FormClosed += (_, _) =>
             {
                 if (!_closingApp && _config.DesktopSearchWidget is not null)
@@ -1055,6 +1055,7 @@ public sealed class MainForm : Form
         var includeDesktopFiles = SearchEnabled(_config.SearchDesktopFiles);
         var includeStartMenuApps = SearchEnabled(_config.SearchStartMenuApps);
         var includeProjectPaths = SearchEnabled(_config.SearchProjectPaths);
+        var includeCustomPaths = SearchEnabled(_config.SearchCustomPaths);
 
         void AddEntry(string title, string type, string subtitle, Action open)
         {
@@ -1214,6 +1215,17 @@ public sealed class MainForm : Form
                     }
                 }
             }
+
+            if (includeCustomPaths)
+            {
+                foreach (var path in _config.SearchCustomRoots.ToArray())
+                {
+                    if (Directory.Exists(path))
+                    {
+                        yield return path;
+                    }
+                }
+            }
         }
 
         void AddPathsFromRoot(string root)
@@ -1291,6 +1303,27 @@ public sealed class MainForm : Form
             var line = text.Split(new[] { "\r\n", "\n" }, StringSplitOptions.None).FirstOrDefault() ?? "";
             return line.Length <= 80 ? line : line[..80];
         }
+    }
+
+    private static List<QuickSearchEntry> SearchEverythingEntries(string query)
+    {
+        return EverythingSearchProvider.Search(query, 80)
+            .Select(path =>
+            {
+                var title = Path.GetFileNameWithoutExtension(path);
+                if (string.IsNullOrWhiteSpace(title))
+                {
+                    title = Path.GetFileName(path);
+                }
+
+                if (string.IsNullOrWhiteSpace(title))
+                {
+                    title = path;
+                }
+
+                return new QuickSearchEntry(title, "Everything", path, () => OpenPath(path));
+            })
+            .ToList();
     }
 
     private Control CreateHomeDesktopCard()
@@ -1561,6 +1594,18 @@ public sealed class MainForm : Form
                 value =>
                 {
                     _config.DesktopLauncherWidgetSnap = value;
+                    _store.SaveConfig(_config);
+                },
+                _config.DesktopLauncherWidgetShowNames,
+                value =>
+                {
+                    _config.DesktopLauncherWidgetShowNames = value;
+                    _store.SaveConfig(_config);
+                },
+                _config.DesktopLauncherWidgetIconSize,
+                value =>
+                {
+                    _config.DesktopLauncherWidgetIconSize = value;
                     _store.SaveConfig(_config);
                 });
             _desktopLauncherWidget.ManageRequested += OpenLauncherManager;
@@ -2864,6 +2909,7 @@ public sealed class MainForm : Form
         var itemList = CreateDesktopEntryGrid();
         categoryList.AllowDrop = true;
         itemList.AllowDrop = true;
+        desktopList.MultiSelect = true;
         itemList.MultiSelect = true;
 
         var addToCategoryButton = CreateButton("归入分类");
@@ -3113,17 +3159,22 @@ public sealed class MainForm : Form
         string? activeDesktopPageDragPath = null;
         bool handledDesktopPageDrop = false;
 
-        static DataObject CreateDesktopEntryDragData(string path)
+        DataObject CreateDesktopEntryDragData(string[] paths, Action? launcherCopyHandled = null)
         {
             var data = new DataObject();
-            data.SetData(DataFormats.Text, path);
-            data.SetData(DataFormats.FileDrop, new[] { path });
+            data.SetData(DataFormats.Text, paths.FirstOrDefault() ?? "");
+            data.SetData(DataFormats.FileDrop, paths);
+            if (launcherCopyHandled is not null)
+            {
+                data.SetData(DustDeskDragData.LauncherCopyHandledFormat, launcherCopyHandled);
+            }
+
             return data;
         }
 
-        static DragDropEffects DoDesktopEntryDrag(Control source, string path)
+        DragDropEffects DoDesktopEntryDrag(Control source, string[] paths, Action? launcherCopyHandled = null)
         {
-            using var preview = new DragPreviewForm(path);
+            using var preview = new DragPreviewForm(paths);
             void MovePreview() => preview.MoveToCursor(Cursor.Position);
             GiveFeedbackEventHandler giveFeedback = (_, e) =>
             {
@@ -3138,7 +3189,7 @@ public sealed class MainForm : Form
                 MovePreview();
                 source.GiveFeedback += giveFeedback;
                 source.QueryContinueDrag += queryContinue;
-                return source.DoDragDrop(CreateDesktopEntryDragData(path), DragDropEffects.Move | DragDropEffects.Copy);
+                return source.DoDragDrop(CreateDesktopEntryDragData(paths, launcherCopyHandled), DragDropEffects.Move | DragDropEffects.Copy);
             }
             finally
             {
@@ -3169,10 +3220,11 @@ public sealed class MainForm : Form
                 || Math.Abs(e.Y - pendingDesktopDragStart.Y) >= SystemInformation.DragSize.Height / 2)
             {
                 var entry = pendingDesktopDrag;
+                var paths = SelectedDesktopEntries(desktopList).Select(item => item.Path).DefaultIfEmpty(entry.Path).Distinct(StringComparer.OrdinalIgnoreCase).ToArray();
                 pendingDesktopDrag = null;
                 activeDesktopPageDragPath = entry.Path;
                 handledDesktopPageDrop = false;
-                DoDesktopEntryDrag(desktopList, entry.Path);
+                DoDesktopEntryDrag(desktopList, paths);
                 activeDesktopPageDragPath = null;
             }
         };
@@ -3198,13 +3250,18 @@ public sealed class MainForm : Form
                 || Math.Abs(e.Y - pendingItemDragStart.Y) >= SystemInformation.DragSize.Height / 2)
             {
                 var entry = pendingItemDrag;
+                var paths = SelectedDesktopEntries(itemList).Select(item => item.Path).DefaultIfEmpty(entry.Path).Distinct(StringComparer.OrdinalIgnoreCase).ToArray();
                 pendingItemDrag = null;
                 activeDesktopPageDragPath = entry.Path;
                 handledDesktopPageDrop = false;
-                var effect = DoDesktopEntryDrag(itemList, entry.Path);
+                var effect = DoDesktopEntryDrag(itemList, paths, () => handledDesktopPageDrop = true);
                 if (effect != DragDropEffects.None && !handledDesktopPageDrop)
                 {
-                    DesktopOrganizerStorage.MoveToDesktopAndRemove(_config, entry.Path);
+                    foreach (var path in paths)
+                    {
+                        DesktopOrganizerStorage.MoveToDesktopAndRemove(_config, path);
+                    }
+
                     _store.SaveConfig(_config);
                     RefreshAll();
                     _desktopOrganizerWidget?.RefreshWidget();
@@ -3218,7 +3275,7 @@ public sealed class MainForm : Form
         itemList.DragEnter += (_, e) => SetDragEffect(e);
         categoryList.DragDrop += (_, e) =>
         {
-            if (e.Data?.GetData(DataFormats.Text) is string path)
+            foreach (var path in GetDroppedPaths(e))
             {
                 if (!string.IsNullOrWhiteSpace(activeDesktopPageDragPath)
                     && string.Equals(path, activeDesktopPageDragPath, StringComparison.OrdinalIgnoreCase))
@@ -3231,7 +3288,7 @@ public sealed class MainForm : Form
         };
         itemList.DragDrop += (_, e) =>
         {
-            if (e.Data?.GetData(DataFormats.Text) is string path)
+            foreach (var path in GetDroppedPaths(e))
             {
                 if (!string.IsNullOrWhiteSpace(activeDesktopPageDragPath)
                     && string.Equals(path, activeDesktopPageDragPath, StringComparison.OrdinalIgnoreCase))
@@ -4798,6 +4855,7 @@ public sealed class MainForm : Form
             var path = GetDroppedLauncherPath(e);
             if (path is not null && AddLauncherFromPath(path))
             {
+                DustDeskDragData.MarkLauncherCopyHandled(e.Data);
                 RefreshLaunchers();
                 RefreshDesktopLauncherWidget();
             }
@@ -4919,13 +4977,13 @@ public sealed class MainForm : Form
         var stack = new TableLayoutPanel
         {
             Dock = DockStyle.Top,
-            Height = 454,
+            Height = 518,
             ColumnCount = 1,
-            RowCount = 7,
+            RowCount = 8,
             BackColor = Color.Transparent
         };
         stack.RowStyles.Add(new RowStyle(SizeType.Absolute, 42));
-        for (var i = 1; i < 7; i++)
+        for (var i = 1; i < 8; i++)
         {
             stack.RowStyles.Add(new RowStyle(SizeType.Absolute, 64));
         }
@@ -4942,8 +5000,9 @@ public sealed class MainForm : Form
         stack.Controls.Add(CreateSearchSourceRow("桌面文件", "系统桌面和桌面收纳中的文件、文件夹", _config.SearchDesktopFiles, value => _config.SearchDesktopFiles = value), 0, 2);
         stack.Controls.Add(CreateSearchSourceRow("开始菜单应用", "开始菜单、公共开始菜单和快捷启动路径", _config.SearchStartMenuApps, value => _config.SearchStartMenuApps = value), 0, 3);
         stack.Controls.Add(CreateSearchSourceRow("项目路径", "项目、阶段、子任务关联的文件夹和文件", _config.SearchProjectPaths, value => _config.SearchProjectPaths = value), 0, 4);
-        stack.Controls.Add(CreateSearchTransparentRow(), 0, 5);
-        stack.Controls.Add(CreateSettingRow("桌面组件", "点击上方“添加到桌面”会显示胶囊搜索框"), 0, 6);
+        stack.Controls.Add(CreateCustomSearchPathRow(), 0, 5);
+        stack.Controls.Add(CreateSearchTransparentRow(), 0, 6);
+        stack.Controls.Add(CreateSettingRow("桌面组件", "点击上方“添加到桌面”会显示胶囊搜索框"), 0, 7);
         panel.Controls.Add(stack);
         page.Controls.Add(panel, 0, 2);
 
@@ -4982,6 +5041,91 @@ public sealed class MainForm : Form
         content.Controls.Add(toggle);
         content.Controls.Add(hint);
         return row;
+    }
+
+    private Control CreateCustomSearchPathRow()
+    {
+        var row = CreateSettingShell("其他位置", out var content);
+        var toggle = new CheckBox
+        {
+            Text = SearchEnabled(_config.SearchCustomPaths) ? "已开启" : "已关闭",
+            Checked = SearchEnabled(_config.SearchCustomPaths),
+            AutoSize = true,
+            ForeColor = TextColorMain,
+            Cursor = Cursors.Hand,
+            Location = new Point(0, 12)
+        };
+        var hint = new Label
+        {
+            Text = CustomSearchHintText(),
+            Location = new Point(112, 10),
+            Size = new Size(430, 34),
+            ForeColor = TextColorSubtle,
+            TextAlign = ContentAlignment.MiddleLeft,
+            AutoEllipsis = true
+        };
+        var addButton = CreateButton("添加文件夹");
+        addButton.AutoSize = false;
+        addButton.SetBounds(560, 10, 104, 32);
+        var clearButton = CreateButton("清空");
+        clearButton.AutoSize = false;
+        clearButton.SetBounds(676, 10, 74, 32);
+
+        toggle.CheckedChanged += (_, _) =>
+        {
+            _config.SearchCustomPaths = toggle.Checked;
+            _store.SaveConfig(_config);
+            _desktopSearchWidget?.RefreshSearch();
+            toggle.Text = toggle.Checked ? "已开启" : "已关闭";
+        };
+        addButton.Click += (_, _) =>
+        {
+            using var dialog = new FolderBrowserDialog
+            {
+                Description = "选择要加入搜索的位置",
+                SelectedPath = Directory.Exists(_store.DataDirectory) ? _store.DataDirectory : AppContext.BaseDirectory,
+                UseDescriptionForTitle = true
+            };
+            if (dialog.ShowDialog(this) != DialogResult.OK || string.IsNullOrWhiteSpace(dialog.SelectedPath))
+            {
+                return;
+            }
+
+            var selectedPath = Path.GetFullPath(dialog.SelectedPath);
+            if (!_config.SearchCustomRoots.Any(path => string.Equals(Path.GetFullPath(path), selectedPath, StringComparison.OrdinalIgnoreCase)))
+            {
+                _config.SearchCustomRoots.Add(selectedPath);
+                _config.SearchCustomPaths = true;
+                _store.SaveConfig(_config);
+                _desktopSearchWidget?.RefreshSearch();
+            }
+
+            toggle.Checked = true;
+            hint.Text = CustomSearchHintText();
+        };
+        clearButton.Click += (_, _) =>
+        {
+            _config.SearchCustomRoots.Clear();
+            _store.SaveConfig(_config);
+            _desktopSearchWidget?.RefreshSearch();
+            hint.Text = CustomSearchHintText();
+        };
+
+        content.Controls.Add(toggle);
+        content.Controls.Add(hint);
+        content.Controls.Add(addButton);
+        content.Controls.Add(clearButton);
+        return row;
+    }
+
+    private string CustomSearchHintText()
+    {
+        if (_config.SearchCustomRoots.Count == 0)
+        {
+            return "添加 D/E/F 盘中的文件夹后可搜索其他位置";
+        }
+
+        return $"已添加 {_config.SearchCustomRoots.Count} 个位置：{string.Join("；", _config.SearchCustomRoots.Take(2))}";
     }
 
     private Control CreateSearchSourceRow(string title, string detail, bool? current, Action<bool> changed)
@@ -5142,9 +5286,19 @@ public sealed class MainForm : Form
         {
             Text = _store.DataDirectory,
             AutoSize = false,
-            Location = new Point(0, 11),
-            Size = new Size(720, 30),
+            Location = new Point(0, 5),
+            Size = new Size(720, 24),
             ForeColor = TextColorSubtle,
+            TextAlign = ContentAlignment.MiddleLeft,
+            AutoEllipsis = true
+        };
+        var hintLabel = new Label
+        {
+            Text = "换新版本后，可点“选择”找到之前的数据文件夹并读取。",
+            AutoSize = false,
+            Location = new Point(0, 30),
+            Size = new Size(720, 20),
+            ForeColor = Color.FromArgb(136, 154, 178),
             TextAlign = ContentAlignment.MiddleLeft,
             AutoEllipsis = true
         };
@@ -5164,11 +5318,40 @@ public sealed class MainForm : Form
                 return;
             }
 
-            _store.SetDataDirectory(dialog.SelectedPath);
+            var selectedPath = Path.GetFullPath(dialog.SelectedPath);
+            var hasExistingData = _store.HasDataDirectory(selectedPath)
+                && !string.Equals(selectedPath, _store.DataDirectory, StringComparison.OrdinalIgnoreCase);
+            if (hasExistingData)
+            {
+                var result = MessageBox.Show(
+                    this,
+                    "这个文件夹里已有 DustDesk 数据。\n\n点“是”读取这个位置的数据并重启；点“否”把当前数据复制到这个位置。",
+                    "切换数据位置",
+                    MessageBoxButtons.YesNoCancel,
+                    MessageBoxIcon.Question);
+                if (result == DialogResult.Cancel)
+                {
+                    return;
+                }
+
+                if (result == DialogResult.Yes)
+                {
+                    _store.SetDataDirectory(selectedPath, copyExistingData: false);
+                    MessageBox.Show(this, "数据位置已切换，程序将重启后读取。", "DustDesk", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                    _exitRequested = true;
+                    _closingApp = true;
+                    Application.Restart();
+                    Close();
+                    return;
+                }
+            }
+
+            _store.SetDataDirectory(selectedPath);
             SaveAllData();
             pathLabel.Text = _store.DataDirectory;
         };
         content.Controls.Add(pathLabel);
+        content.Controls.Add(hintLabel);
         content.Controls.Add(chooseButton);
         return row;
     }
@@ -5575,16 +5758,22 @@ public sealed class MainForm : Form
     private void ResetInMemoryData()
     {
         _config.DesktopWidgetTransparent = false;
+        _config.DesktopOrganizerShowNames = false;
+        _config.DesktopOrganizerIconSize = 48;
         _config.DesktopTodoWidgetTransparent = false;
         _config.DesktopProjectWidgetTransparent = false;
         _config.DesktopLauncherWidgetTransparent = false;
         _config.DesktopLauncherWidgetSnap = false;
+        _config.DesktopLauncherWidgetShowNames = true;
+        _config.DesktopLauncherWidgetIconSize = 48;
         _config.StartHiddenToTray = false;
         _config.MainWindowHotKey = "Ctrl+Shift+K";
         _config.SearchAppData = true;
         _config.SearchDesktopFiles = true;
         _config.SearchStartMenuApps = true;
         _config.SearchProjectPaths = true;
+        _config.SearchCustomPaths = true;
+        _config.SearchCustomRoots.Clear();
         _config.DesktopSearchWidgetTransparent = false;
         _config.DesktopOrganizerWidget = null;
         _config.DesktopTodoWidget = null;
@@ -5989,7 +6178,23 @@ public sealed class MainForm : Form
 
     private static void SetDragEffect(DragEventArgs e)
     {
-        e.Effect = e.Data?.GetDataPresent(DataFormats.Text) == true ? DragDropEffects.Move : DragDropEffects.None;
+        e.Effect = GetDroppedPaths(e).Any() ? DragDropEffects.Move : DragDropEffects.None;
+    }
+
+    private static string[] GetDroppedPaths(DragEventArgs e)
+    {
+        if (e.Data?.GetDataPresent(DataFormats.FileDrop) == true
+            && e.Data.GetData(DataFormats.FileDrop) is string[] files
+            && files.Length > 0)
+        {
+            return files.Where(path => File.Exists(path) || Directory.Exists(path)).Distinct(StringComparer.OrdinalIgnoreCase).ToArray();
+        }
+
+        return e.Data?.GetDataPresent(DataFormats.Text) == true
+            && e.Data.GetData(DataFormats.Text) is string path
+            && (File.Exists(path) || Directory.Exists(path))
+            ? new[] { path }
+            : Array.Empty<string>();
     }
 
     private static void OpenPath(string path)
@@ -7192,8 +7397,12 @@ internal sealed class DesktopLauncherWidgetForm : Form
     private readonly Func<string, string?, bool, bool> _pathDropped;
     private readonly Action<bool> _transparentChanged;
     private readonly Action<bool> _snapChanged;
+    private readonly Action<bool> _showNamesChanged;
+    private readonly Action<int> _iconSizeChanged;
     private bool _transparent;
     private bool _snap;
+    private bool _showNames;
+    private int _iconSize;
     private bool _attachedToDesktop;
     private bool _restoringPlacement;
     private bool _snapping;
@@ -7202,7 +7411,7 @@ internal sealed class DesktopLauncherWidgetForm : Form
     private bool _launcherChromeExpandedUp;
     private int _launcherChromeBaseHeight;
 
-    public DesktopLauncherWidgetForm(LaunchData launchers, Action<Rectangle> placementChanged, Func<string, string?, bool, bool> pathDropped, bool transparent, Action<bool> transparentChanged, bool snap, Action<bool> snapChanged)
+    public DesktopLauncherWidgetForm(LaunchData launchers, Action<Rectangle> placementChanged, Func<string, string?, bool, bool> pathDropped, bool transparent, Action<bool> transparentChanged, bool snap, Action<bool> snapChanged, bool showNames, Action<bool> showNamesChanged, int iconSize, Action<int> iconSizeChanged)
     {
         _placementChanged = placementChanged;
         _pathDropped = pathDropped;
@@ -7210,7 +7419,11 @@ internal sealed class DesktopLauncherWidgetForm : Form
         _transparentChanged = transparentChanged;
         _snap = snap;
         _snapChanged = snapChanged;
-        _view = new DesktopLauncherWidgetView(launchers, _pathDropped, _transparent, SetTransparent, _snap, SetSnap)
+        _showNames = showNames;
+        _showNamesChanged = showNamesChanged;
+        _iconSize = iconSize;
+        _iconSizeChanged = iconSizeChanged;
+        _view = new DesktopLauncherWidgetView(launchers, _pathDropped, _transparent, SetTransparent, _snap, SetSnap, _showNames, SetShowNames, _iconSize, SetIconSize)
         {
             Dock = DockStyle.Fill
         };
@@ -7312,6 +7525,18 @@ internal sealed class DesktopLauncherWidgetForm : Form
         _snapChanged(_snap);
         SnapToEdges();
         SavePlacement();
+    }
+
+    private void SetShowNames(bool showNames)
+    {
+        _showNames = showNames;
+        _showNamesChanged(_showNames);
+    }
+
+    private void SetIconSize(int iconSize)
+    {
+        _iconSize = iconSize;
+        _iconSizeChanged(_iconSize);
     }
 
     private void ApplyWidgetSkin()
@@ -7562,15 +7787,22 @@ internal sealed class DesktopLauncherWidgetView : Control
 {
     private const int WmContextMenu = 0x007B;
     private const int MaxLaunchers = 5;
+    private const int MinLauncherIconSize = 34;
+    private const int MaxLauncherIconSize = 64;
 
     private readonly LaunchData _launchers;
     private readonly Func<string, string?, bool, bool> _pathDropped;
     private readonly ContextMenuStrip _menu = new();
     private readonly ToolStripMenuItem _transparentMenuItem = new("透明");
     private readonly ToolStripMenuItem _snapMenuItem = new("吸附");
+    private readonly ToolStripMenuItem _showNamesMenuItem = new("显示名称");
+    private readonly ToolStripMenuItem _increaseIconMenuItem = new("增大图标");
+    private readonly ToolStripMenuItem _decreaseIconMenuItem = new("减小图标");
     private readonly System.Windows.Forms.Timer _chromeTimer = new();
     private readonly Action<bool> _transparentChanged;
     private readonly Action<bool> _snapChanged;
+    private readonly Action<bool> _showNamesChanged;
+    private readonly Action<int> _iconSizeChanged;
     private readonly Dictionary<string, Image> _iconCache = new(StringComparer.OrdinalIgnoreCase);
     private readonly List<(Rectangle Rect, LaunchItem Item)> _launcherAreas = new();
     private readonly Image? _settingsIcon;
@@ -7578,6 +7810,8 @@ internal sealed class DesktopLauncherWidgetView : Control
     private Rectangle _resizeRect;
     private bool _transparent;
     private bool _snap;
+    private bool _showNames;
+    private int _iconSize;
     private bool _chromeVisible = true;
     private bool _suppressNextContextMenu;
 
@@ -7589,8 +7823,9 @@ internal sealed class DesktopLauncherWidgetView : Control
     private static readonly Color TextMuted = Color.FromArgb(170, 188, 210);
     private static readonly Font TitleFont = new("Microsoft YaHei UI", 12F, FontStyle.Regular);
     private static readonly Font SmallFont = new("Microsoft YaHei UI", 8.5F);
+    private int CurrentIconSize => Math.Clamp(_iconSize <= 0 ? 48 : _iconSize, MinLauncherIconSize, MaxLauncherIconSize);
 
-    public DesktopLauncherWidgetView(LaunchData launchers, Func<string, string?, bool, bool> pathDropped, bool transparent, Action<bool> transparentChanged, bool snap, Action<bool> snapChanged)
+    public DesktopLauncherWidgetView(LaunchData launchers, Func<string, string?, bool, bool> pathDropped, bool transparent, Action<bool> transparentChanged, bool snap, Action<bool> snapChanged, bool showNames, Action<bool> showNamesChanged, int iconSize, Action<int> iconSizeChanged)
     {
         _launchers = launchers;
         _pathDropped = pathDropped;
@@ -7598,6 +7833,10 @@ internal sealed class DesktopLauncherWidgetView : Control
         _transparentChanged = transparentChanged;
         _snap = snap;
         _snapChanged = snapChanged;
+        _showNames = showNames;
+        _showNamesChanged = showNamesChanged;
+        _iconSize = iconSize;
+        _iconSizeChanged = iconSizeChanged;
         AllowDrop = true;
         SetStyle(ControlStyles.AllPaintingInWmPaint | ControlStyles.UserPaint | ControlStyles.OptimizedDoubleBuffer | ControlStyles.ResizeRedraw, true);
         using var settingsIcon = LoadLauncherWidgetImage("images", "zhuomianguinarongqi", "shezhi.png");
@@ -7618,9 +7857,42 @@ internal sealed class DesktopLauncherWidgetView : Control
             _snapChanged(_snap);
             Invalidate();
         };
+        _showNamesMenuItem.CheckOnClick = true;
+        _showNamesMenuItem.Checked = _showNames;
+        _showNamesMenuItem.Click += (_, _) =>
+        {
+            _showNames = _showNamesMenuItem.Checked;
+            _showNamesChanged(_showNames);
+            Invalidate();
+        };
+        _increaseIconMenuItem.Click += (_, _) =>
+        {
+            SetLauncherIconSize(CurrentIconSize + 6);
+        };
+        _decreaseIconMenuItem.Click += (_, _) =>
+        {
+            SetLauncherIconSize(CurrentIconSize - 6);
+        };
         _menu.Items.Add("管理", null, (_, _) => ManageRequested?.Invoke());
         var skinMenu = new ToolStripMenuItem("皮肤设置");
+        var keepSkinMenuOpen = false;
+        _increaseIconMenuItem.MouseDown += (_, _) => keepSkinMenuOpen = true;
+        _decreaseIconMenuItem.MouseDown += (_, _) => keepSkinMenuOpen = true;
+        skinMenu.DropDown.Closing += (_, e) =>
+        {
+            if (e.CloseReason == ToolStripDropDownCloseReason.ItemClicked && keepSkinMenuOpen)
+            {
+                e.Cancel = true;
+                BeginInvoke(new Action(() => keepSkinMenuOpen = false));
+                return;
+            }
+
+            keepSkinMenuOpen = false;
+        };
         skinMenu.DropDownItems.Add(_transparentMenuItem);
+        skinMenu.DropDownItems.Add(_showNamesMenuItem);
+        skinMenu.DropDownItems.Add(_increaseIconMenuItem);
+        skinMenu.DropDownItems.Add(_decreaseIconMenuItem);
         _menu.Items.Add(skinMenu);
         _menu.Items.Add(_snapMenuItem);
         _menu.Items.Add("关闭", null, (_, _) => CloseRequested?.Invoke());
@@ -7628,6 +7900,9 @@ internal sealed class DesktopLauncherWidgetView : Control
         {
             _transparentMenuItem.Checked = _transparent;
             _snapMenuItem.Checked = _snap;
+            _showNamesMenuItem.Checked = _showNames;
+            _increaseIconMenuItem.Enabled = CurrentIconSize < MaxLauncherIconSize;
+            _decreaseIconMenuItem.Enabled = CurrentIconSize > MinLauncherIconSize;
         };
         _chromeTimer.Interval = 5000;
         _chromeTimer.Tick += (_, _) =>
@@ -7808,6 +8083,7 @@ internal sealed class DesktopLauncherWidgetView : Control
         var path = GetDroppedPath(e);
         if (path is not null && _pathDropped(path, null, true))
         {
+            DustDeskDragData.MarkLauncherCopyHandled(e.Data);
             RefreshLaunchers();
         }
 
@@ -7848,8 +8124,8 @@ internal sealed class DesktopLauncherWidgetView : Control
             return;
         }
 
-        var tileW = 78;
-        var tileH = 82;
+        var tileW = Math.Max(78, CurrentIconSize + 28);
+        var tileH = Math.Max(82, CurrentIconSize + (_showNames ? 34 : 16));
         var horizontal = Width >= Height;
         for (var i = 0; i < _launchers.Items.Count; i++)
         {
@@ -7870,7 +8146,11 @@ internal sealed class DesktopLauncherWidgetView : Control
 
     private void DrawLauncher(Graphics g, Rectangle rect, LaunchItem item)
     {
-        var icon = new Rectangle(rect.X + rect.Width / 2 - 24, rect.Y + 2, 48, 48);
+        var labelHeight = _showNames ? 20 : 0;
+        var iconSize = Math.Clamp(CurrentIconSize, MinLauncherIconSize, Math.Min(MaxLauncherIconSize, Math.Min(rect.Width - 10, Math.Max(MinLauncherIconSize, rect.Height - 8 - labelHeight))));
+        var contentHeight = iconSize + labelHeight + (_showNames ? 4 : 0);
+        var iconY = rect.Y + Math.Max(0, (rect.Height - contentHeight) / 2);
+        var icon = new Rectangle(rect.X + rect.Width / 2 - iconSize / 2, iconY, iconSize, iconSize);
         var shellIcon = GetShellIcon(item.Path);
         if (shellIcon is not null)
         {
@@ -7882,7 +8162,19 @@ internal sealed class DesktopLauncherWidgetView : Control
             DrawCentered(g, string.IsNullOrWhiteSpace(item.Name) ? "+" : item.Name[..1], TitleFont, Color.White, icon);
         }
 
-        DrawCentered(g, item.Name, SmallFont, TextMain, new Rectangle(rect.X, icon.Bottom + 3, rect.Width, 24));
+        if (_showNames)
+        {
+            DrawCentered(g, TrimDisplayName(item.Name, 5), SmallFont, TextMain, new Rectangle(rect.X, icon.Bottom + 4, rect.Width, labelHeight));
+        }
+    }
+
+    private void SetLauncherIconSize(int iconSize)
+    {
+        _iconSize = Math.Clamp(iconSize, MinLauncherIconSize, MaxLauncherIconSize);
+        _iconSizeChanged(_iconSize);
+        _increaseIconMenuItem.Enabled = CurrentIconSize < MaxLauncherIconSize;
+        _decreaseIconMenuItem.Enabled = CurrentIconSize > MinLauncherIconSize;
+        Invalidate();
     }
 
     private void RestartChromeTimer()
@@ -8046,6 +8338,16 @@ internal sealed class DesktopLauncherWidgetView : Control
     private static void DrawCentered(Graphics g, string text, Font font, Color color, Rectangle rect)
     {
         TextRenderer.DrawText(g, text, font, rect, color, TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis);
+    }
+
+    private static string TrimDisplayName(string name, int maxLength)
+    {
+        if (string.IsNullOrWhiteSpace(name) || name.Length <= maxLength)
+        {
+            return name;
+        }
+
+        return name[..maxLength];
     }
 }
 
@@ -9285,6 +9587,8 @@ internal sealed class DesktopTodoWidgetView : Control
 
 internal sealed class DesktopNoteWidgetForm : Form
 {
+    private const int WsExToolWindow = 0x00000080;
+    private const int WsExAppWindow = 0x00040000;
     private readonly NoteItem _note;
     private readonly DesktopNoteWidgetView _view;
     private readonly Action<NoteItem, Rectangle> _placementChanged;
@@ -9302,6 +9606,7 @@ internal sealed class DesktopNoteWidgetForm : Form
         Text = _note.Title;
         FormBorderStyle = FormBorderStyle.None;
         ShowInTaskbar = false;
+        ShowIcon = false;
         StartPosition = FormStartPosition.Manual;
         Size = new Size(420, 300);
         BackColor = Color.FromArgb(20, 28, 40);
@@ -9318,6 +9623,17 @@ internal sealed class DesktopNoteWidgetForm : Form
 
     public bool Displays(NoteItem item) => ReferenceEquals(item, _note);
 
+    protected override CreateParams CreateParams
+    {
+        get
+        {
+            var cp = base.CreateParams;
+            cp.ExStyle |= WsExToolWindow;
+            cp.ExStyle &= ~WsExAppWindow;
+            return cp;
+        }
+    }
+
     public void FocusWidget()
     {
         BringToFront();
@@ -9328,6 +9644,7 @@ internal sealed class DesktopNoteWidgetForm : Form
     {
         ApplyPlacementOrDefault(placement);
         Show();
+        NativeGlass.ApplyToolWindowStyle(Handle);
         BringToFront();
         AttachToDesktopHost();
         BringToFront();
@@ -9977,6 +10294,7 @@ internal static class DesktopOrganizerStorage
             Directory.Delete(target, recursive: true);
         }
 
+        var sourceWasDirectory = Directory.Exists(source);
         if (File.Exists(source))
         {
             File.Move(source, target);
@@ -9986,6 +10304,7 @@ internal static class DesktopOrganizerStorage
             Directory.Move(source, target);
         }
 
+        NativeGlass.NotifyShellMoved(source, target, sourceWasDirectory);
         return target;
     }
 
@@ -10074,24 +10393,34 @@ internal sealed class DragPreviewForm : Form
     private const int WsExToolWindow = 0x00000080;
     private const int WsExNoActivate = 0x08000000;
     private const int WsExTransparent = 0x00000020;
-    private const int WsExLayered = 0x00080000;
     private const int WmNchittest = 0x0084;
     private const int HtTransparent = -1;
-    private const int UlwAlpha = 0x00000002;
-    private const byte AcSrcOver = 0x00;
-    private const byte AcSrcAlpha = 0x01;
-    private readonly Image? _icon;
-    private readonly string _name;
+    private readonly List<(Image? Icon, string Name)> _items;
 
     public DragPreviewForm(string path)
+        : this(new[] { path })
     {
-        _name = GetDisplayName(path);
-        _icon = File.Exists(path) || Directory.Exists(path) ? ShellIconLoader.LoadLargeIcon(path) : null;
+    }
+
+    public DragPreviewForm(IEnumerable<string> paths)
+    {
+        _items = paths
+            .Where(path => File.Exists(path) || Directory.Exists(path))
+            .Take(4)
+            .Select(path => (Icon: ShellIconLoader.LoadLargeIcon(path), Name: GetDisplayName(path)))
+            .ToList();
+        if (_items.Count == 0)
+        {
+            _items.Add((null, "?"));
+        }
+
         FormBorderStyle = FormBorderStyle.None;
         ShowInTaskbar = false;
         StartPosition = FormStartPosition.Manual;
-        Size = new Size(48, 48);
+        Size = _items.Count > 1 ? new Size(58, 58) : new Size(48, 48);
         TopMost = true;
+        BackColor = Color.Magenta;
+        TransparencyKey = Color.Magenta;
         SetStyle(ControlStyles.AllPaintingInWmPaint | ControlStyles.UserPaint | ControlStyles.OptimizedDoubleBuffer, true);
     }
 
@@ -10102,21 +10431,15 @@ internal sealed class DragPreviewForm : Form
         get
         {
             var cp = base.CreateParams;
-            cp.ExStyle |= WsExToolWindow | WsExNoActivate | WsExTransparent | WsExLayered;
+            cp.ExStyle |= WsExToolWindow | WsExNoActivate | WsExTransparent;
             return cp;
         }
     }
 
     public void MoveToCursor(Point cursor)
     {
-        Location = new Point(cursor.X + 10, cursor.Y + 10);
-        UpdateLayeredPreview();
-    }
-
-    protected override void OnShown(EventArgs e)
-    {
-        base.OnShown(e);
-        UpdateLayeredPreview();
+        SetBounds(cursor.X + 10, cursor.Y + 10, Width, Height);
+        Invalidate();
     }
 
     protected override void WndProc(ref Message m)
@@ -10134,72 +10457,47 @@ internal sealed class DragPreviewForm : Form
     {
         base.OnPaint(e);
         e.Graphics.SmoothingMode = SmoothingMode.AntiAlias;
-        DrawPreviewIcon(e.Graphics, new Rectangle(0, 0, Width, Height));
-    }
-
-    private void UpdateLayeredPreview()
-    {
-        if (!IsHandleCreated || Width <= 0 || Height <= 0)
+        e.Graphics.Clear(TransparencyKey);
+        if (_items.Count == 1)
         {
+            DrawPreviewIcon(e.Graphics, new Rectangle(0, 0, 48, 48), _items[0]);
             return;
         }
 
-        using var bitmap = new Bitmap(Width, Height, System.Drawing.Imaging.PixelFormat.Format32bppPArgb);
-        using (var graphics = Graphics.FromImage(bitmap))
+        for (var i = Math.Min(_items.Count, 4) - 1; i >= 0; i--)
         {
-            graphics.Clear(Color.Transparent);
-            graphics.SmoothingMode = SmoothingMode.AntiAlias;
-            graphics.InterpolationMode = InterpolationMode.HighQualityBicubic;
-            DrawPreviewIcon(graphics, new Rectangle(0, 0, Width, Height));
+            var offset = i * 4;
+            DrawPreviewIcon(e.Graphics, new Rectangle(offset, offset, 48, 48), _items[i]);
         }
 
-        var screenDc = GetDC(IntPtr.Zero);
-        var memoryDc = CreateCompatibleDC(screenDc);
-        var bitmapHandle = bitmap.GetHbitmap(Color.FromArgb(0));
-        var oldBitmap = SelectObject(memoryDc, bitmapHandle);
-        try
-        {
-            var size = new LayeredSize { Cx = Width, Cy = Height };
-            var source = new LayeredPoint();
-            var position = new LayeredPoint { X = Left, Y = Top };
-            var blend = new BlendFunction
-            {
-                BlendOp = AcSrcOver,
-                BlendFlags = 0,
-                SourceConstantAlpha = 255,
-                AlphaFormat = AcSrcAlpha
-            };
-            _ = UpdateLayeredWindow(Handle, screenDc, ref position, ref size, memoryDc, ref source, 0, ref blend, UlwAlpha);
-        }
-        finally
-        {
-            _ = SelectObject(memoryDc, oldBitmap);
-            _ = DeleteObject(bitmapHandle);
-            _ = DeleteDC(memoryDc);
-            _ = ReleaseDC(IntPtr.Zero, screenDc);
-        }
+        using var badge = new SolidBrush(Color.FromArgb(35, 107, 238));
+        using var badgePath = RoundPath(new Rectangle(36, 36, 20, 20), 10);
+        e.Graphics.FillPath(badge, badgePath);
+        TextRenderer.DrawText(e.Graphics, _items.Count.ToString(), new Font("Microsoft YaHei UI", 8F, FontStyle.Bold), new Rectangle(36, 36, 20, 20), Color.White, TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter);
     }
 
-    private void DrawPreviewIcon(Graphics graphics, Rectangle iconRect)
+    private void DrawPreviewIcon(Graphics graphics, Rectangle iconRect, (Image? Icon, string Name) item)
     {
-        if (_icon is not null)
+        if (item.Icon is not null)
         {
-            graphics.DrawImage(_icon, iconRect);
+            graphics.DrawImage(item.Icon, iconRect);
+            return;
         }
-        else
-        {
-            using var brush = new SolidBrush(IconColor(_name));
-            using var path = RoundPath(iconRect, 8);
-            graphics.FillPath(brush, path);
-            TextRenderer.DrawText(graphics, IconText(_name), new Font("Microsoft YaHei UI", 12F, FontStyle.Bold), iconRect, Color.White, TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter);
-        }
+
+        using var brush = new SolidBrush(IconColor(item.Name));
+        using var path = RoundPath(iconRect, 8);
+        graphics.FillPath(brush, path);
+        TextRenderer.DrawText(graphics, IconText(item.Name), new Font("Microsoft YaHei UI", 12F, FontStyle.Bold), iconRect, Color.White, TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter);
     }
 
     protected override void Dispose(bool disposing)
     {
         if (disposing)
         {
-            _icon?.Dispose();
+            foreach (var item in _items)
+            {
+                item.Icon?.Dispose();
+            }
         }
 
         base.Dispose(disposing);
@@ -10244,27 +10542,6 @@ internal sealed class DragPreviewForm : Form
         return path;
     }
 
-    [DllImport("user32.dll", SetLastError = true)]
-    private static extern IntPtr GetDC(IntPtr windowHandle);
-
-    [DllImport("user32.dll", SetLastError = true)]
-    private static extern int ReleaseDC(IntPtr windowHandle, IntPtr deviceContext);
-
-    [DllImport("gdi32.dll", SetLastError = true)]
-    private static extern IntPtr CreateCompatibleDC(IntPtr deviceContext);
-
-    [DllImport("gdi32.dll", SetLastError = true)]
-    private static extern bool DeleteDC(IntPtr deviceContext);
-
-    [DllImport("gdi32.dll", SetLastError = true)]
-    private static extern IntPtr SelectObject(IntPtr deviceContext, IntPtr handle);
-
-    [DllImport("gdi32.dll", SetLastError = true)]
-    private static extern bool DeleteObject(IntPtr handle);
-
-    [DllImport("user32.dll", SetLastError = true)]
-    private static extern bool UpdateLayeredWindow(IntPtr windowHandle, IntPtr destinationDc, ref LayeredPoint position, ref LayeredSize size, IntPtr sourceDc, ref LayeredPoint source, int colorKey, ref BlendFunction blend, int flags);
-
     [StructLayout(LayoutKind.Sequential)]
     private struct LayeredPoint
     {
@@ -10291,6 +10568,8 @@ internal sealed class DragPreviewForm : Form
 
 internal sealed class DesktopOrganizerWidgetForm : Form
 {
+    private const int WsExToolWindow = 0x00000080;
+    private const int WsExAppWindow = 0x00040000;
     private const int ResizeBorder = 12;
     private const int WmNchittest = 0x0084;
     private const int HtClient = 1;
@@ -10326,6 +10605,7 @@ internal sealed class DesktopOrganizerWidgetForm : Form
         Size = new Size(620, 520);
         MinimumSize = new Size(300, 240);
         ShowInTaskbar = false;
+        ShowIcon = false;
         TopMost = false;
         BackColor = Color.FromArgb(20, 28, 40);
         Font = new Font("Microsoft YaHei UI", 9F);
@@ -10358,8 +10638,20 @@ internal sealed class DesktopOrganizerWidgetForm : Form
         }
 
         Show();
+        NativeGlass.ApplyToolWindowStyle(Handle);
         AttachToDesktopHost();
         SavePlacement();
+    }
+
+    protected override CreateParams CreateParams
+    {
+        get
+        {
+            var cp = base.CreateParams;
+            cp.ExStyle |= WsExToolWindow;
+            cp.ExStyle &= ~WsExAppWindow;
+            return cp;
+        }
     }
 
     protected override void OnHandleCreated(EventArgs e)
@@ -10820,6 +11112,9 @@ internal sealed class DesktopOrganizerWidgetView : Control
     private readonly ContextMenuStrip _settingsMenu = new();
     private readonly bool _isSplit;
     private readonly ToolStripMenuItem _transparentMenuItem = new("透明");
+    private readonly ToolStripMenuItem _showNamesMenuItem = new("显示名称");
+    private readonly ToolStripMenuItem _increaseIconMenuItem = new("增大图标");
+    private readonly ToolStripMenuItem _decreaseIconMenuItem = new("减小图标");
     private readonly ToolStripMenuItem _splitMenuItem = new("拆分");
     private readonly ToolStripMenuItem _mergeMenuItem = new("合并");
     private readonly ToolTip _itemToolTip = new()
@@ -10863,7 +11158,9 @@ internal sealed class DesktopOrganizerWidgetView : Control
     private bool _suppressNextClick;
     private const int DragThreshold = 6;
     private const int PreviewTileWidth = 120;
-    private const int PreviewTileHeight = 82;
+    private const int BasePreviewTileHeight = 82;
+    private const int MinOrganizerIconSize = 34;
+    private const int MaxOrganizerIconSize = 64;
     private const int HeaderTop = 13;
     private const int HeaderHeight = 64;
     private const int ListBottomInset = 18;
@@ -10884,6 +11181,8 @@ internal sealed class DesktopOrganizerWidgetView : Control
     private Color CurrentCardFill => _config.DesktopWidgetTransparent ? Color.FromArgb(74, 18, 30, 46) : CardFill;
     private Color CurrentCardBorder => _config.DesktopWidgetTransparent ? Color.FromArgb(132, 150, 194, 238) : CardBorder;
     private Color CurrentPanelFill => _config.DesktopWidgetTransparent ? Color.FromArgb(44, 10, 22, 36) : PanelFill;
+    private int CurrentIconSize => Math.Clamp(_config.DesktopOrganizerIconSize <= 0 ? 48 : _config.DesktopOrganizerIconSize, MinOrganizerIconSize, MaxOrganizerIconSize);
+    private int CurrentTileHeight => Math.Max(BasePreviewTileHeight, CurrentIconSize + (_config.DesktopOrganizerShowNames ? 34 : 20));
 
     public DesktopOrganizerWidgetView(AppConfig config, Func<IEnumerable<DeskCategory>>? categoryProvider = null, bool isSplit = false)
     {
@@ -10909,19 +11208,61 @@ internal sealed class DesktopOrganizerWidgetView : Control
         _mergeMenuItem.Click += (_, _) => MergeRequested?.Invoke();
         _settingsMenu.Items.Add(_mergeMenuItem);
         var skinMenu = new ToolStripMenuItem("皮肤设置");
+        var keepSkinMenuOpen = false;
+        _increaseIconMenuItem.MouseDown += (_, _) => keepSkinMenuOpen = true;
+        _decreaseIconMenuItem.MouseDown += (_, _) => keepSkinMenuOpen = true;
+        skinMenu.DropDown.Closing += (_, e) =>
+        {
+            if (e.CloseReason == ToolStripDropDownCloseReason.ItemClicked && keepSkinMenuOpen)
+            {
+                e.Cancel = true;
+                BeginInvoke(new Action(() => keepSkinMenuOpen = false));
+                return;
+            }
+
+            keepSkinMenuOpen = false;
+        };
         _transparentMenuItem.Checked = _config.DesktopWidgetTransparent;
+        _showNamesMenuItem.CheckOnClick = true;
+        _showNamesMenuItem.Checked = _config.DesktopOrganizerShowNames;
         _transparentMenuItem.Click += (_, _) =>
         {
             _config.DesktopWidgetTransparent = !_config.DesktopWidgetTransparent;
             _transparentMenuItem.Checked = _config.DesktopWidgetTransparent;
             SkinChangedRequested?.Invoke();
         };
+        _showNamesMenuItem.Click += (_, _) =>
+        {
+            _config.DesktopOrganizerShowNames = _showNamesMenuItem.Checked;
+            SkinChangedRequested?.Invoke();
+            Invalidate();
+        };
+        _increaseIconMenuItem.Click += (_, _) =>
+        {
+            _config.DesktopOrganizerIconSize = Math.Clamp(CurrentIconSize + 6, MinOrganizerIconSize, MaxOrganizerIconSize);
+            _previewScrollOffsets.Clear();
+            SkinChangedRequested?.Invoke();
+            Invalidate();
+        };
+        _decreaseIconMenuItem.Click += (_, _) =>
+        {
+            _config.DesktopOrganizerIconSize = Math.Clamp(CurrentIconSize - 6, MinOrganizerIconSize, MaxOrganizerIconSize);
+            _previewScrollOffsets.Clear();
+            SkinChangedRequested?.Invoke();
+            Invalidate();
+        };
         skinMenu.DropDownItems.Add(_transparentMenuItem);
+        skinMenu.DropDownItems.Add(_showNamesMenuItem);
+        skinMenu.DropDownItems.Add(_increaseIconMenuItem);
+        skinMenu.DropDownItems.Add(_decreaseIconMenuItem);
         _settingsMenu.Items.Add(skinMenu);
         _settingsMenu.Items.Add("关闭组件", null, (_, _) => CloseRequested?.Invoke());
         _settingsMenu.Opening += (_, _) =>
         {
             _transparentMenuItem.Checked = _config.DesktopWidgetTransparent;
+            _showNamesMenuItem.Checked = _config.DesktopOrganizerShowNames;
+            _increaseIconMenuItem.Enabled = CurrentIconSize < MaxOrganizerIconSize;
+            _decreaseIconMenuItem.Enabled = CurrentIconSize > MinOrganizerIconSize;
             _splitMenuItem.Visible = !_isSplit;
             _splitMenuItem.Enabled = CurrentCategory() is not null && Categories().Count > 1;
             _mergeMenuItem.Visible = _isSplit;
@@ -11203,7 +11544,7 @@ internal sealed class DesktopOrganizerWidgetView : Control
         var hit = _previewAreas.FirstOrDefault(item => item.Rect.Contains(e.Location));
         if (hit.Category is not null)
         {
-            SetPreviewOffset(hit.Category, hit.Rect.Width, hit.Rect.Height, _previewScrollOffsets.GetValueOrDefault(hit.Category) + (e.Delta < 0 ? PreviewTileHeight : -PreviewTileHeight));
+            SetPreviewOffset(hit.Category, hit.Rect.Width, hit.Rect.Height, _previewScrollOffsets.GetValueOrDefault(hit.Category) + (e.Delta < 0 ? CurrentTileHeight : -CurrentTileHeight));
             return;
         }
 
@@ -11213,7 +11554,7 @@ internal sealed class DesktopOrganizerWidgetView : Control
     protected override void OnDragEnter(DragEventArgs e)
     {
         UpdateExternalDragPreview(e);
-        e.Effect = GetDroppedPath(e) is null ? DragDropEffects.None : DragDropEffects.Move;
+        e.Effect = GetDroppedPaths(e).Length == 0 ? DragDropEffects.None : DragDropEffects.Move;
         base.OnDragEnter(e);
     }
 
@@ -11233,13 +11574,14 @@ internal sealed class DesktopOrganizerWidgetView : Control
             UpdateExternalDragInsert(location, GetDroppedPath(e));
         }
 
-        e.Effect = GetDroppedPath(e) is null ? DragDropEffects.None : DragDropEffects.Move;
+        e.Effect = GetDroppedPaths(e).Length == 0 ? DragDropEffects.None : DragDropEffects.Move;
         base.OnDragOver(e);
     }
 
     protected override void OnDragDrop(DragEventArgs e)
     {
-        var path = GetDroppedPath(e);
+        var paths = GetDroppedPaths(e);
+        var path = paths.FirstOrDefault();
         HideExternalDragPreview();
         var categories = Categories();
         if (path is not null && categories.Count > 0)
@@ -11277,7 +11619,10 @@ internal sealed class DesktopOrganizerWidgetView : Control
                 return;
             }
 
-            PathDroppedRequested?.Invoke(categories[_selectedCategoryIndex], path, insertIndex);
+            for (var i = 0; i < paths.Length; i++)
+            {
+                PathDroppedRequested?.Invoke(categories[_selectedCategoryIndex], paths[i], insertIndex.HasValue ? insertIndex.Value + i : null);
+            }
         }
 
         _dragTargetCategoryIndex = -1;
@@ -11571,9 +11916,9 @@ internal sealed class DesktopOrganizerWidgetView : Control
             {
                 var tile = new Rectangle(
                     previewArea.X + i % columns * PreviewTileWidth,
-                    previewArea.Y + i / columns * PreviewTileHeight - offset,
+                    previewArea.Y + i / columns * CurrentTileHeight - offset,
                     PreviewTileWidth - 2,
-                    PreviewTileHeight - 4);
+                    CurrentTileHeight - 4);
                 if (tile.Bottom < previewArea.Top || tile.Top > previewArea.Bottom)
                 {
                     continue;
@@ -11583,7 +11928,6 @@ internal sealed class DesktopOrganizerWidgetView : Control
                     && ReferenceEquals(category, _dragItemCategory)
                     && string.Equals(itemPaths[i], _dragItemPath, StringComparison.OrdinalIgnoreCase))
                 {
-                    DrawDragPlaceholder(g, tile);
                     continue;
                 }
 
@@ -11657,6 +12001,7 @@ internal sealed class DesktopOrganizerWidgetView : Control
         data.SetData(DataFormats.FileDrop, new[] { path });
         _activeDraggedItemPath = path;
         _handledActiveDraggedItemDrop = false;
+        data.SetData(DustDeskDragData.LauncherCopyHandledFormat, new Action(() => _handledActiveDraggedItemDrop = true));
         using var preview = new DragPreviewForm(path);
         void MovePreview() => preview.MoveToCursor(Cursor.Position);
         GiveFeedbackEventHandler giveFeedback = (_, e) =>
@@ -11800,7 +12145,7 @@ internal sealed class DesktopOrganizerWidgetView : Control
         var offset = _previewScrollOffsets.GetValueOrDefault(category);
         var localX = Math.Clamp(location.X - previewArea.X, 0, Math.Max(0, previewArea.Width - 1));
         var localY = Math.Max(0, location.Y - previewArea.Y + offset);
-        var row = localY / PreviewTileHeight;
+        var row = localY / CurrentTileHeight;
         var column = Math.Clamp(localX / PreviewTileWidth, 0, columns - 1);
         var afterHalf = localX % PreviewTileWidth >= PreviewTileWidth / 2;
         var index = row * columns + column + (afterHalf ? 1 : 0);
@@ -11858,7 +12203,7 @@ internal sealed class DesktopOrganizerWidgetView : Control
 
     private static void DrawSelectedTile(Graphics g, Rectangle tile)
     {
-        var rect = new Rectangle(tile.X + 6, tile.Y + 2, tile.Width - 14, Math.Min(tile.Height - 8, 62));
+        var rect = new Rectangle(tile.X + 6, tile.Y + 3, tile.Width - 14, Math.Max(1, tile.Height - 10));
         FillRound(g, rect, Color.FromArgb(72, 58, 144, 255), 8);
         DrawRound(g, rect, Color.FromArgb(160, 128, 184, 255), 8);
     }
@@ -11912,14 +12257,14 @@ internal sealed class DesktopOrganizerWidgetView : Control
         return Math.Max(1, areaWidth / PreviewTileWidth);
     }
 
-    private static int GetPreviewContentHeight(int itemCount, int columns)
+    private int GetPreviewContentHeight(int itemCount, int columns)
     {
         if (itemCount <= 0)
         {
             return 0;
         }
 
-        return (int)Math.Ceiling(itemCount / (double)Math.Max(1, columns)) * PreviewTileHeight;
+        return (int)Math.Ceiling(itemCount / (double)Math.Max(1, columns)) * CurrentTileHeight;
     }
 
     private bool CanScrollCategoryTabs(int areaWidth)
@@ -12036,8 +12381,12 @@ internal sealed class DesktopOrganizerWidgetView : Control
     private void DrawAppTile(Graphics g, Rectangle tile, string path)
     {
         var name = GetDisplayName(path);
-        var iconSize = Math.Clamp(Math.Min(tile.Width - 12, tile.Height - 10), 34, 52);
-        var icon = new Rectangle(tile.X + tile.Width / 2 - iconSize / 2, tile.Y + tile.Height / 2 - iconSize / 2, iconSize, iconSize);
+        var showName = _config.DesktopOrganizerShowNames;
+        var labelHeight = showName ? 18 : 0;
+        var iconSize = Math.Clamp(CurrentIconSize, MinOrganizerIconSize, Math.Min(MaxOrganizerIconSize, Math.Min(tile.Width - 12, tile.Height - 12 - labelHeight)));
+        var contentHeight = iconSize + labelHeight + (showName ? 4 : 0);
+        var iconY = tile.Y + Math.Max(0, (tile.Height - contentHeight) / 2);
+        var icon = new Rectangle(tile.X + tile.Width / 2 - iconSize / 2, iconY, iconSize, iconSize);
         var shellIcon = GetShellIcon(path);
         if (shellIcon is not null)
         {
@@ -12048,12 +12397,29 @@ internal sealed class DesktopOrganizerWidgetView : Control
             FillRound(g, icon, IconColor(name), 7);
             DrawCentered(g, IconText(name), IconFont, Color.White, icon);
         }
+
+        if (showName)
+        {
+            var label = TrimDisplayName(name, 5);
+            var labelRect = new Rectangle(tile.X + 4, icon.Bottom + 4, tile.Width - 8, labelHeight);
+            TextRenderer.DrawText(g, label, SmallFont, labelRect, TextMain, TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis | TextFormatFlags.NoPadding);
+        }
     }
 
     private static string GetDisplayName(string path)
     {
         var name = Path.GetFileNameWithoutExtension(path);
         return string.IsNullOrWhiteSpace(name) ? Path.GetFileName(path) : name;
+    }
+
+    private static string TrimDisplayName(string name, int maxLength)
+    {
+        if (string.IsNullOrWhiteSpace(name) || name.Length <= maxLength)
+        {
+            return name;
+        }
+
+        return name[..maxLength];
     }
 
     private static Image? LoadWidgetImage(params string[] parts)
@@ -12317,14 +12683,20 @@ internal sealed class DesktopOrganizerWidgetView : Control
 
     private static string? GetDroppedPath(DragEventArgs e)
     {
+        return GetDroppedPaths(e).FirstOrDefault();
+    }
+
+    private static string[] GetDroppedPaths(DragEventArgs e)
+    {
         if (e.Data?.GetDataPresent(DataFormats.FileDrop) == true && e.Data.GetData(DataFormats.FileDrop) is string[] files && files.Length > 0)
         {
-            return files[0];
+            return files.Where(path => File.Exists(path) || Directory.Exists(path)).Distinct(StringComparer.OrdinalIgnoreCase).ToArray();
         }
 
         return e.Data?.GetDataPresent(DataFormats.Text) == true && e.Data.GetData(DataFormats.Text) is string path
-            ? path
-            : null;
+            && (File.Exists(path) || Directory.Exists(path))
+            ? new[] { path }
+            : Array.Empty<string>();
     }
 
     private static string GetUniquePath(string path)
@@ -12603,6 +12975,140 @@ internal sealed class SidebarMenu : Control
 
 internal sealed record QuickSearchEntry(string Title, string Type, string Subtitle, Action Open);
 
+internal static class EverythingSearchProvider
+{
+    private static string? _esPath;
+    private static bool _searchedExecutable;
+
+    public static List<string> Search(string query, int maxResults)
+    {
+        if (string.IsNullOrWhiteSpace(query))
+        {
+            return new List<string>();
+        }
+
+        var executable = FindExecutable();
+        if (executable is null)
+        {
+            return new List<string>();
+        }
+
+        try
+        {
+            using var process = new Process();
+            process.StartInfo = new ProcessStartInfo
+            {
+                FileName = executable,
+                UseShellExecute = false,
+                RedirectStandardOutput = true,
+                RedirectStandardError = true,
+                CreateNoWindow = true
+            };
+            process.StartInfo.ArgumentList.Add("-n");
+            process.StartInfo.ArgumentList.Add(Math.Clamp(maxResults, 1, 200).ToString(CultureInfo.InvariantCulture));
+            process.StartInfo.ArgumentList.Add(query);
+
+            if (!process.Start())
+            {
+                return new List<string>();
+            }
+
+            if (!process.WaitForExit(700))
+            {
+                try
+                {
+                    process.Kill(entireProcessTree: true);
+                }
+                catch
+                {
+                }
+
+                return new List<string>();
+            }
+
+            var results = new List<string>();
+            while (!process.StandardOutput.EndOfStream && results.Count < maxResults)
+            {
+                var line = process.StandardOutput.ReadLine();
+                if (!string.IsNullOrWhiteSpace(line) && (File.Exists(line) || Directory.Exists(line)))
+                {
+                    results.Add(Path.GetFullPath(line));
+                }
+            }
+
+            return results.Distinct(StringComparer.OrdinalIgnoreCase).ToList();
+        }
+        catch
+        {
+            return new List<string>();
+        }
+    }
+
+    private static string? FindExecutable()
+    {
+        if (_searchedExecutable)
+        {
+            return _esPath;
+        }
+
+        _searchedExecutable = true;
+        foreach (var path in CandidatePaths())
+        {
+            try
+            {
+                if (File.Exists(path))
+                {
+                    _esPath = path;
+                    return _esPath;
+                }
+            }
+            catch
+            {
+            }
+        }
+
+        return null;
+    }
+
+    private static IEnumerable<string> CandidatePaths()
+    {
+        yield return Path.Combine(AppContext.BaseDirectory, "es.exe");
+        yield return Path.Combine(Directory.GetCurrentDirectory(), "es.exe");
+
+        var programFiles = Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles);
+        if (!string.IsNullOrWhiteSpace(programFiles))
+        {
+            yield return Path.Combine(programFiles, "Everything", "es.exe");
+        }
+
+        var programFilesX86 = Environment.GetFolderPath(Environment.SpecialFolder.ProgramFilesX86);
+        if (!string.IsNullOrWhiteSpace(programFilesX86))
+        {
+            yield return Path.Combine(programFilesX86, "Everything", "es.exe");
+        }
+
+        var pathValue = Environment.GetEnvironmentVariable("PATH") ?? "";
+        foreach (var directory in pathValue.Split(Path.PathSeparator, StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
+        {
+            yield return Path.Combine(directory, "es.exe");
+        }
+    }
+}
+
+internal static class DustDeskDragData
+{
+    public const string LauncherCopyHandledFormat = "DustDesk.LauncherCopyHandled";
+
+    public static void MarkLauncherCopyHandled(IDataObject? data)
+    {
+        if (data?.GetDataPresent(LauncherCopyHandledFormat) == true
+            && data.GetData(LauncherCopyHandledFormat) is Action handled)
+        {
+            handled();
+        }
+    }
+}
+
 internal sealed class DoubleBufferedListBox : ListBox
 {
     public DoubleBufferedListBox()
@@ -12616,6 +13122,7 @@ internal sealed class DoubleBufferedListBox : ListBox
 internal sealed class QuickSearchForm : Form
 {
     private readonly List<QuickSearchEntry> _entries;
+    private readonly Func<string, List<QuickSearchEntry>> _globalSearchProvider;
     private readonly TextBox _input = new();
     private readonly ListView _list = new();
 
@@ -12625,9 +13132,10 @@ internal sealed class QuickSearchForm : Form
     private static readonly Color TextMain = Color.FromArgb(240, 245, 252);
     private static readonly Color TextSubtle = Color.FromArgb(154, 169, 188);
 
-    public QuickSearchForm(IEnumerable<QuickSearchEntry> entries)
+    public QuickSearchForm(IEnumerable<QuickSearchEntry> entries, Func<string, List<QuickSearchEntry>>? globalSearchProvider = null)
     {
         _entries = entries.ToList();
+        _globalSearchProvider = globalSearchProvider ?? (_ => new List<QuickSearchEntry>());
         Text = "快速检索";
         FormBorderStyle = FormBorderStyle.FixedSingle;
         MaximizeBox = false;
@@ -12746,14 +13254,18 @@ internal sealed class QuickSearchForm : Form
     {
         var query = _input.Text.Trim();
         var items = string.IsNullOrWhiteSpace(query)
-            ? _entries.Take(80)
-            : _entries
+            ? _entries.Take(80).ToList()
+            : MergeSearchResults(
+                _globalSearchProvider(query),
+                _entries
                 .Select(entry => (Entry: entry, Score: MatchScore(entry, query)))
                 .Where(item => item.Score >= 0)
                 .OrderByDescending(item => item.Score)
                 .ThenBy(item => item.Entry.Title, StringComparer.CurrentCultureIgnoreCase)
                 .Take(80)
-                .Select(item => item.Entry);
+                .Select(item => item.Entry))
+                .Take(80)
+                .ToList();
 
         _list.BeginUpdate();
         try
@@ -12811,6 +13323,22 @@ internal sealed class QuickSearchForm : Form
         return score;
     }
 
+    private static List<QuickSearchEntry> MergeSearchResults(IEnumerable<QuickSearchEntry> primary, IEnumerable<QuickSearchEntry> secondary)
+    {
+        var results = new List<QuickSearchEntry>();
+        var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var entry in primary.Concat(secondary))
+        {
+            var key = string.IsNullOrWhiteSpace(entry.Subtitle) ? $"{entry.Type}:{entry.Title}" : entry.Subtitle;
+            if (seen.Add(key))
+            {
+                results.Add(entry);
+            }
+        }
+
+        return results;
+    }
+
     private void OpenFirst()
     {
         if (_list.Items.Count > 0)
@@ -12842,8 +13370,11 @@ internal sealed class DesktopSearchWidgetForm : Form
     private const int ShadowInset = 8;
     private const int SearchIconAreaWidth = 52;
     private const int ClearButtonSize = 28;
+    private const int ResizeGripWidth = 14;
+    private const int HtRight = 11;
 
     private readonly Func<List<QuickSearchEntry>> _entryProvider;
+    private readonly Func<string, List<QuickSearchEntry>> _globalSearchProvider;
     private readonly Action<Rectangle> _placementChanged;
     private readonly Func<bool> _transparentProvider;
     private readonly TextBox _input = new();
@@ -12870,9 +13401,10 @@ internal sealed class DesktopSearchWidgetForm : Form
     private Color SearchIconBackColor => TransparentStyle ? Color.FromArgb(130, 180, 255) : Color.FromArgb(94, 116, 142);
     private Color SearchChipBackColor => TransparentStyle ? Color.FromArgb(44, 10, 22, 36) : Color.FromArgb(218, 230, 242);
 
-    public DesktopSearchWidgetForm(Func<List<QuickSearchEntry>> entryProvider, Action<Rectangle> placementChanged, Func<bool> transparentProvider)
+    public DesktopSearchWidgetForm(Func<List<QuickSearchEntry>> entryProvider, Func<string, List<QuickSearchEntry>>? globalSearchProvider, Action<Rectangle> placementChanged, Func<bool> transparentProvider)
     {
         _entryProvider = entryProvider;
+        _globalSearchProvider = globalSearchProvider ?? (_ => new List<QuickSearchEntry>());
         _placementChanged = placementChanged;
         _transparentProvider = transparentProvider;
         Text = "快速搜索";
@@ -13143,13 +13675,15 @@ internal sealed class DesktopSearchWidgetForm : Form
             ReloadEntries();
         }
 
-        var items = _entries
+        var localItems = _entries
             .Select(item => (Entry: item, Score: QuickSearchForm.MatchScore(item, query)))
             .Where(item => item.Score >= 0)
             .OrderByDescending(item => item.Score)
             .ThenBy(item => item.Entry.Title, StringComparer.CurrentCultureIgnoreCase)
             .Take(8)
-            .Select(item => item.Entry)
+            .Select(item => item.Entry);
+        var items = MergeSearchResults(_globalSearchProvider(query), localItems)
+            .Take(8)
             .ToList();
 
         _results.BeginUpdate();
@@ -13188,6 +13722,7 @@ internal sealed class DesktopSearchWidgetForm : Form
                     .OrderByDescending(item => item.Score)
                     .ThenBy(item => item.Entry.Title, StringComparer.CurrentCultureIgnoreCase)
                     .Select(item => item.Entry)
+                    .Concat(_globalSearchProvider(query))
                     .FirstOrDefault();
 
         if (entry is not null)
@@ -13247,6 +13782,22 @@ internal sealed class DesktopSearchWidgetForm : Form
         }
     }
 
+    private static List<QuickSearchEntry> MergeSearchResults(IEnumerable<QuickSearchEntry> primary, IEnumerable<QuickSearchEntry> secondary)
+    {
+        var results = new List<QuickSearchEntry>();
+        var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var entry in primary.Concat(secondary))
+        {
+            var key = string.IsNullOrWhiteSpace(entry.Subtitle) ? $"{entry.Type}:{entry.Title}" : entry.Subtitle;
+            if (seen.Add(key))
+            {
+                results.Add(entry);
+            }
+        }
+
+        return results;
+    }
+
     protected override void OnPaint(PaintEventArgs e)
     {
         base.OnPaint(e);
@@ -13282,6 +13833,7 @@ internal sealed class DesktopSearchWidgetForm : Form
         }
 
         DrawSearchIcon(g, new Rectangle(_capsuleRect.X + 17, _capsuleRect.Y + 13, 18, 18), Color.FromArgb(238, 246, 255));
+        DrawResizeGrip(g);
 
         if (!string.IsNullOrEmpty(_input.Text))
         {
@@ -13315,6 +13867,12 @@ internal sealed class DesktopSearchWidgetForm : Form
 
     protected override void OnMouseDown(MouseEventArgs e)
     {
+        if (e.Button == MouseButtons.Left && IsResizeGrip(e.Location))
+        {
+            NativeGlass.BeginResize(Handle, HtRight);
+            return;
+        }
+
         if (e.Button == MouseButtons.Left && !_clearRect.IsEmpty && _clearRect.Contains(e.Location) && !string.IsNullOrEmpty(_input.Text))
         {
             _input.Clear();
@@ -13336,6 +13894,12 @@ internal sealed class DesktopSearchWidgetForm : Form
         }
 
         base.OnMouseDown(e);
+    }
+
+    protected override void OnMouseMove(MouseEventArgs e)
+    {
+        Cursor = IsResizeGrip(e.Location) ? Cursors.SizeWE : Cursors.Default;
+        base.OnMouseMove(e);
     }
 
     private void FocusSearchInput()
@@ -13533,6 +14097,35 @@ internal sealed class DesktopSearchWidgetForm : Form
         var titleWidth = Math.Max(1, bounds.Width - typeWidth - 26);
         var measured = TextRenderer.MeasureText(entry.Title, _results.Font, Size.Empty, TextFormatFlags.SingleLine | TextFormatFlags.NoPadding);
         return measured.Width > titleWidth;
+    }
+
+    private bool IsResizeGrip(Point location)
+    {
+        if (_capsuleRect.IsEmpty)
+        {
+            return false;
+        }
+
+        var grip = new Rectangle(_capsuleRect.Right - ResizeGripWidth, _capsuleRect.Y + 5, ResizeGripWidth + 4, _capsuleRect.Height - 10);
+        return grip.Contains(location);
+    }
+
+    private void DrawResizeGrip(Graphics g)
+    {
+        if (_capsuleRect.Width < 120)
+        {
+            return;
+        }
+
+        using var pen = new Pen(Color.FromArgb(TransparentStyle ? 96 : 82, 72, 86, 104), 1.2F)
+        {
+            StartCap = LineCap.Round,
+            EndCap = LineCap.Round
+        };
+        var x = _capsuleRect.Right - 13;
+        var y = _capsuleRect.Y + _capsuleRect.Height / 2;
+        g.DrawLine(pen, x, y - 7, x, y + 7);
+        g.DrawLine(pen, x + 4, y - 5, x + 4, y + 5);
     }
 
     private static void DrawSearchIcon(Graphics g, Rectangle rect, Color color)
