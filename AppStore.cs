@@ -5,7 +5,11 @@ namespace DustDesk;
 
 public sealed class AppStore
 {
-    private readonly string _dataDirectorySettingPath = Path.Combine(AppContext.BaseDirectory, "data-path.txt");
+    private readonly string _appDataRoot = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "DustDesk");
+    private readonly string _legacyDataDirectorySettingPath = Path.Combine(AppContext.BaseDirectory, "data-path.txt");
+    private readonly string _legacyDefaultDataDirectory = Path.Combine(AppContext.BaseDirectory, "Data");
+    private string DataDirectorySettingPath => Path.Combine(_appDataRoot, "data-path.txt");
+    private string DefaultDataDirectory => Path.Combine(_appDataRoot, "Data");
     private readonly JsonSerializerOptions _jsonOptions = new()
     {
         WriteIndented = true,
@@ -71,7 +75,13 @@ public sealed class AppStore
         SaveNotes(notes);
     }
 
-    public void SetDataDirectory(string directory)
+    public bool HasDataDirectory(string directory)
+    {
+        var target = Path.GetFullPath(directory.Trim());
+        return HasDataFiles(target);
+    }
+
+    public void SetDataDirectory(string directory, bool copyExistingData = true)
     {
         var target = Path.GetFullPath(directory.Trim());
         if (string.Equals(target, DataDirectory, StringComparison.OrdinalIgnoreCase))
@@ -80,23 +90,46 @@ public sealed class AppStore
         }
 
         Directory.CreateDirectory(target);
-        CopyExistingData(target);
-        File.WriteAllText(_dataDirectorySettingPath, target);
+        if (copyExistingData)
+        {
+            CopyExistingData(target);
+        }
+
+        SaveDataDirectorySetting(target);
         DataDirectory = target;
     }
 
     private string LoadDataDirectorySetting()
     {
-        if (File.Exists(_dataDirectorySettingPath))
+        Directory.CreateDirectory(_appDataRoot);
+        if (File.Exists(DataDirectorySettingPath))
         {
-            var configured = File.ReadAllText(_dataDirectorySettingPath).Trim();
+            var configured = File.ReadAllText(DataDirectorySettingPath).Trim();
             if (!string.IsNullOrWhiteSpace(configured))
             {
                 return Path.GetFullPath(configured);
             }
         }
 
-        return Path.Combine(AppContext.BaseDirectory, "Data");
+        if (File.Exists(_legacyDataDirectorySettingPath))
+        {
+            var configured = File.ReadAllText(_legacyDataDirectorySettingPath).Trim();
+            if (!string.IsNullOrWhiteSpace(configured))
+            {
+                var migrated = Path.GetFullPath(configured);
+                SaveDataDirectorySetting(migrated);
+                return migrated;
+            }
+        }
+
+        if (Directory.Exists(_legacyDefaultDataDirectory) && !HasDataFiles(DefaultDataDirectory))
+        {
+            Directory.CreateDirectory(DefaultDataDirectory);
+            CopyDataFiles(_legacyDefaultDataDirectory, DefaultDataDirectory);
+        }
+
+        SaveDataDirectorySetting(DefaultDataDirectory);
+        return DefaultDataDirectory;
     }
 
     private void CopyExistingData(string targetDirectory)
@@ -106,7 +139,18 @@ public sealed class AppStore
             return;
         }
 
-        foreach (var file in Directory.GetFiles(DataDirectory))
+        CopyDataFiles(DataDirectory, targetDirectory);
+    }
+
+    private void SaveDataDirectorySetting(string directory)
+    {
+        Directory.CreateDirectory(_appDataRoot);
+        File.WriteAllText(DataDirectorySettingPath, Path.GetFullPath(directory));
+    }
+
+    private static void CopyDataFiles(string sourceDirectory, string targetDirectory)
+    {
+        foreach (var file in Directory.GetFiles(sourceDirectory))
         {
             var target = Path.Combine(targetDirectory, Path.GetFileName(file));
             if (!File.Exists(target))
@@ -114,6 +158,13 @@ public sealed class AppStore
                 File.Copy(file, target);
             }
         }
+    }
+
+    private static bool HasDataFiles(string directory)
+    {
+        return Directory.Exists(directory)
+            && new[] { "config.json", "todo.json", "project.json", "launch.json", "note.json", "note.md" }
+                .Any(file => File.Exists(Path.Combine(directory, file)));
     }
 
     private static NoteData CreateDefaultNotes() => new()

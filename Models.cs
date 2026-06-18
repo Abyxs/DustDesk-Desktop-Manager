@@ -5,16 +5,22 @@ namespace DustDesk;
 public sealed class AppConfig
 {
     public bool DesktopWidgetTransparent { get; set; }
+    public bool DesktopOrganizerShowNames { get; set; }
+    public int DesktopOrganizerIconSize { get; set; } = 48;
     public bool DesktopTodoWidgetTransparent { get; set; }
     public bool DesktopProjectWidgetTransparent { get; set; }
     public bool DesktopLauncherWidgetTransparent { get; set; }
     public bool DesktopLauncherWidgetSnap { get; set; }
+    public bool DesktopLauncherWidgetShowNames { get; set; } = true;
+    public int DesktopLauncherWidgetIconSize { get; set; } = 48;
     public bool StartHiddenToTray { get; set; }
     public string MainWindowHotKey { get; set; } = "Ctrl+Shift+K";
     public bool? SearchAppData { get; set; } = true;
     public bool? SearchDesktopFiles { get; set; } = true;
     public bool? SearchStartMenuApps { get; set; } = true;
     public bool? SearchProjectPaths { get; set; } = true;
+    public bool? SearchCustomPaths { get; set; } = true;
+    public List<string> SearchCustomRoots { get; set; } = new();
     public bool DesktopSearchWidgetTransparent { get; set; }
     public WidgetPlacement? DesktopOrganizerWidget { get; set; }
     public WidgetPlacement? DesktopTodoWidget { get; set; }

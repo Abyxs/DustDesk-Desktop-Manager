@@ -14,13 +14,12 @@
 - 项目管理：按项目、阶段、事项管理进度和关联路径。
 - 快捷启动：统一管理常用软件、文件夹和文件。
 - 设置中心：管理组件显示、透明配色、快捷键和基础设置。
-  
-- ## 界面展示
+
+## 界面展示
 
 ![DustDesk 界面展示 1](images/zhanshi1.png)
 
 ![DustDesk 界面展示 2](images/zhanshi2.png)
-
 
 ## 下载使用
 
@@ -69,7 +68,8 @@ DustDesk/
 └─ DustDesk.csproj      项目配置
 ```
 
-
 ## 反馈
+
 问题反馈和咨询：抖音 `Aby081298`
+
 详情可查看：[Linux.do](https://linux.do/u/yuzhi/activity/pending)

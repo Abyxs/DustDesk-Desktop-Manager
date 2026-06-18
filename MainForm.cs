@@ -38,6 +38,7 @@ public sealed class MainForm : Form
     private const int HtBottom = 15;
     private const int HtBottomLeft = 16;
     private const int HtBottomRight = 17;
+    private const int VisibleInset = 8;
     private const double WindowOpacity = 1.0;
     private const int WsSysMenu = 0x00080000;
     private const int WsMinimizeBox = 0x00020000;
@@ -234,6 +235,7 @@ public sealed class MainForm : Form
         base.OnResize(e);
         if (_lastWindowState == FormWindowState.Minimized && WindowState != FormWindowState.Minimized)
         {
+            NavigateHome();
             ForceFullRedrawSoon();
         }
 
@@ -667,8 +669,20 @@ public sealed class MainForm : Form
         ShowInTaskbar = true;
         WindowState = FormWindowState.Normal;
         Show();
+        NavigateHome();
         BringToFront();
         Activate();
+    }
+
+    private void NavigateHome()
+    {
+        if (_nav.SelectedIndex == 0)
+        {
+            ShowPage(0);
+            return;
+        }
+
+        _nav.SelectedIndex = 0;
     }
 
     private void RegisterMainWindowHotKey()
@@ -10581,6 +10595,7 @@ internal sealed class DesktopOrganizerWidgetForm : Form
     private const int HtBottom = 15;
     private const int HtBottomLeft = 16;
     private const int HtBottomRight = 17;
+    private const int VisibleInset = 8;
 
     private readonly AppConfig _config;
     private readonly AppStore _store;
@@ -10714,7 +10729,7 @@ internal sealed class DesktopOrganizerWidgetForm : Form
         {
             if (placement is not null && placement.Width > 0 && placement.Height > 0)
             {
-                Bounds = new Rectangle(placement.X, placement.Y, Math.Max(MinimumSize.Width, placement.Width), Math.Max(MinimumSize.Height, placement.Height));
+                SetScreenBounds(NormalizeScreenBounds(new Rectangle(placement.X, placement.Y, Math.Max(MinimumSize.Width, placement.Width), Math.Max(MinimumSize.Height, placement.Height))));
                 _placedOnce = true;
                 return;
             }
@@ -10728,9 +10743,11 @@ internal sealed class DesktopOrganizerWidgetForm : Form
             return;
         }
 
-        Location = new Point(
+        SetScreenBounds(NormalizeScreenBounds(new Rectangle(
             Math.Max(workArea.Left + 24, workArea.Right - Width - 36),
-            workArea.Top + 88);
+            workArea.Top + 88,
+            Width,
+            Height)));
         _placedOnce = true;
         }
         finally
@@ -10756,7 +10773,37 @@ internal sealed class DesktopOrganizerWidgetForm : Form
             return;
         }
 
-        _placementChanged(Bounds);
+        _placementChanged(NormalizeScreenBounds(GetScreenBounds()));
+    }
+
+    private Rectangle GetScreenBounds()
+    {
+        return IsHandleCreated ? RectangleToScreen(ClientRectangle) : Bounds;
+    }
+
+    private void SetScreenBounds(Rectangle bounds)
+    {
+        if (_attachedToDesktop && IsHandleCreated)
+        {
+            NativeGlass.SetDesktopChildScreenBounds(Handle, bounds);
+            return;
+        }
+
+        Bounds = bounds;
+    }
+
+    private Rectangle NormalizeScreenBounds(Rectangle bounds)
+    {
+        var workArea = Screen.FromRectangle(bounds).WorkingArea;
+        var maxWidth = Math.Max(MinimumSize.Width, workArea.Width - VisibleInset * 2);
+        var maxHeight = Math.Max(MinimumSize.Height, workArea.Height - VisibleInset * 2);
+        var width = Math.Clamp(bounds.Width, MinimumSize.Width, maxWidth);
+        var height = Math.Clamp(bounds.Height, MinimumSize.Height, maxHeight);
+        var minX = workArea.Left + VisibleInset;
+        var minY = workArea.Top + VisibleInset;
+        var maxX = Math.Max(minX, workArea.Right - width - VisibleInset);
+        var maxY = Math.Max(minY, workArea.Bottom - height - VisibleInset);
+        return new Rectangle(Math.Clamp(bounds.X, minX, maxX), Math.Clamp(bounds.Y, minY, maxY), width, height);
     }
 
     private void BuildUi()
@@ -11357,7 +11404,7 @@ internal sealed class DesktopOrganizerWidgetView : Control
             var rightPreviewHit = _previewAreas.FirstOrDefault(item => item.Rect.Contains(e.Location));
             if (!rightPreviewHit.Rect.IsEmpty)
             {
-                _settingsMenu.Show(this, e.Location);
+                ShowSettingsMenu(e.Location);
             }
             else
             {
@@ -11392,7 +11439,7 @@ internal sealed class DesktopOrganizerWidgetView : Control
                 CloseRequested?.Invoke();
                 return;
             case "settings":
-                _settingsMenu.Show(this, hit.Rect.Left, hit.Rect.Bottom + 4);
+                ShowSettingsMenu(new Point(hit.Rect.Left, hit.Rect.Bottom + 4));
                 return;
         }
 
@@ -11499,6 +11546,16 @@ internal sealed class DesktopOrganizerWidgetView : Control
     {
         ClearItemToolTip();
         base.OnMouseLeave(e);
+    }
+
+    private void ShowSettingsMenu(Point anchor)
+    {
+        var size = _settingsMenu.GetPreferredSize(Size.Empty);
+        var x = Math.Clamp(anchor.X, 0, Math.Max(0, Width - size.Width));
+        var y = anchor.Y + size.Height > Height
+            ? Math.Max(0, anchor.Y - size.Height - 4)
+            : Math.Clamp(anchor.Y, 0, Math.Max(0, Height - size.Height));
+        _settingsMenu.Show(this, new Point(x, y));
     }
 
     protected override void OnMouseUp(MouseEventArgs e)
@@ -15191,9 +15248,21 @@ internal static class ShellIconLoader
 {
     private const uint ShgfiIcon = 0x000000100;
     private const uint ShgfiLargeIcon = 0x000000000;
-    private const uint ShgfiAddOverlays = 0x000000020;
+    private const uint SigaFsiSysIconIndex = 0x00004000;
+    private const int MaxPath = 260;
 
     public static Image? LoadLargeIcon(string path)
+    {
+        if (string.Equals(Path.GetExtension(path), ".lnk", StringComparison.OrdinalIgnoreCase)
+            && TryLoadShortcutTargetIcon(path, out var shortcutIcon))
+        {
+            return shortcutIcon;
+        }
+
+        return LoadShellIcon(path);
+    }
+
+    private static Image? LoadShellIcon(string path)
     {
         try
         {
@@ -15202,7 +15271,7 @@ internal static class ShellIconLoader
                 0,
                 out var fileInfo,
                 (uint)Marshal.SizeOf<SHFILEINFO>(),
-                ShgfiIcon | ShgfiLargeIcon | ShgfiAddOverlays);
+                ShgfiIcon | ShgfiLargeIcon);
 
             if (result == IntPtr.Zero || fileInfo.hIcon == IntPtr.Zero)
             {
@@ -15225,6 +15294,78 @@ internal static class ShellIconLoader
         }
     }
 
+    private static bool TryLoadShortcutTargetIcon(string shortcutPath, out Image? image)
+    {
+        image = null;
+        object? shellLinkObject = null;
+        try
+        {
+            shellLinkObject = new ShellLink();
+            var persistFile = (System.Runtime.InteropServices.ComTypes.IPersistFile)shellLinkObject;
+            persistFile.Load(shortcutPath, 0);
+            var shellLink = (IShellLinkW)shellLinkObject;
+
+            var iconPath = new StringBuilder(MaxPath);
+            shellLink.GetIconLocation(iconPath, iconPath.Capacity, out var iconIndex);
+            var configuredIcon = Environment.ExpandEnvironmentVariables(iconPath.ToString());
+            if (!string.IsNullOrWhiteSpace(configuredIcon) && File.Exists(configuredIcon))
+            {
+                image = ExtractIconBitmap(configuredIcon, iconIndex);
+                if (image is not null)
+                {
+                    return true;
+                }
+            }
+
+            var targetPath = new StringBuilder(MaxPath);
+            shellLink.GetPath(targetPath, targetPath.Capacity, IntPtr.Zero, 0);
+            var target = Environment.ExpandEnvironmentVariables(targetPath.ToString());
+            if (!string.IsNullOrWhiteSpace(target) && (File.Exists(target) || Directory.Exists(target)))
+            {
+                image = LoadShellIcon(target);
+                return image is not null;
+            }
+        }
+        catch
+        {
+        }
+        finally
+        {
+            if (shellLinkObject is not null)
+            {
+                Marshal.FinalReleaseComObject(shellLinkObject);
+            }
+        }
+
+        return false;
+    }
+
+    private static Image? ExtractIconBitmap(string path, int iconIndex)
+    {
+        try
+        {
+            var count = ExtractIconEx(path, iconIndex, out var largeIcon, out _, 1);
+            if (count <= 0 || largeIcon == IntPtr.Zero)
+            {
+                return null;
+            }
+
+            try
+            {
+                using var icon = (Icon)Icon.FromHandle(largeIcon).Clone();
+                return icon.ToBitmap();
+            }
+            finally
+            {
+                DestroyIcon(largeIcon);
+            }
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
     [DllImport("shell32.dll", CharSet = CharSet.Unicode)]
     private static extern IntPtr SHGetFileInfo(
         string pszPath,
@@ -15236,6 +15377,40 @@ internal static class ShellIconLoader
     [DllImport("user32.dll", SetLastError = true)]
     [return: MarshalAs(UnmanagedType.Bool)]
     private static extern bool DestroyIcon(IntPtr hIcon);
+
+    [DllImport("shell32.dll", CharSet = CharSet.Unicode)]
+    private static extern uint ExtractIconEx(string fileName, int iconIndex, out IntPtr largeIcon, out IntPtr smallIcon, uint icons);
+
+    [ComImport]
+    [Guid("00021401-0000-0000-C000-000000000046")]
+    private sealed class ShellLink
+    {
+    }
+
+    [ComImport]
+    [InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+    [Guid("000214F9-0000-0000-C000-000000000046")]
+    private interface IShellLinkW
+    {
+        void GetPath([Out, MarshalAs(UnmanagedType.LPWStr)] StringBuilder file, int maxPath, IntPtr findData, uint flags);
+        void GetIDList(out IntPtr idList);
+        void SetIDList(IntPtr idList);
+        void GetDescription([Out, MarshalAs(UnmanagedType.LPWStr)] StringBuilder name, int maxName);
+        void SetDescription([MarshalAs(UnmanagedType.LPWStr)] string name);
+        void GetWorkingDirectory([Out, MarshalAs(UnmanagedType.LPWStr)] StringBuilder directory, int maxPath);
+        void SetWorkingDirectory([MarshalAs(UnmanagedType.LPWStr)] string directory);
+        void GetArguments([Out, MarshalAs(UnmanagedType.LPWStr)] StringBuilder arguments, int maxPath);
+        void SetArguments([MarshalAs(UnmanagedType.LPWStr)] string arguments);
+        void GetHotkey(out short hotkey);
+        void SetHotkey(short hotkey);
+        void GetShowCmd(out int showCommand);
+        void SetShowCmd(int showCommand);
+        void GetIconLocation([Out, MarshalAs(UnmanagedType.LPWStr)] StringBuilder iconPath, int iconPathSize, out int iconIndex);
+        void SetIconLocation([MarshalAs(UnmanagedType.LPWStr)] string iconPath, int iconIndex);
+        void SetRelativePath([MarshalAs(UnmanagedType.LPWStr)] string path, uint reserved);
+        void Resolve(IntPtr windowHandle, uint flags);
+        void SetPath([MarshalAs(UnmanagedType.LPWStr)] string file);
+    }
 
     [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
     private struct SHFILEINFO

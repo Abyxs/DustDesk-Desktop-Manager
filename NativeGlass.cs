@@ -11,13 +11,23 @@ internal static class NativeGlass
     private const int WmSpawnWorker = 0x052C;
     private const int SmtoNormal = 0x0000;
     private const int GwlStyle = -16;
+    private const int GwlExStyle = -20;
     private const long WsPopup = 0x80000000L;
     private const long WsChild = 0x40000000L;
     private const long WsVisible = 0x10000000L;
+    private const long WsExToolWindow = 0x00000080L;
+    private const long WsExAppWindow = 0x00040000L;
     private const int SwpFrameChanged = 0x0020;
     private const int SwpShowWindow = 0x0040;
     private const int SwpNoActivate = 0x0010;
     private const int SwpNoZOrder = 0x0004;
+    private const int ShcneCreate = 0x00000002;
+    private const int ShcneDelete = 0x00000004;
+    private const int ShcneMkdir = 0x00000008;
+    private const int ShcneRmdir = 0x00000010;
+    private const int ShcneUpdateDir = 0x00001000;
+    private const uint ShcnfPathW = 0x0005;
+    private const uint ShcnfFlushNowait = 0x2000;
 
     public static void EnableAcrylic(IntPtr handle, Color tint)
     {
@@ -124,6 +134,7 @@ internal static class NativeGlass
         style &= ~WsPopup;
         style |= WsChild | WsVisible;
         _ = SetWindowLongPtr(handle, GwlStyle, new IntPtr(style));
+        ApplyToolWindowStyle(handle);
         var location = new NativePoint { X = rect.Left, Y = rect.Top };
         _ = ScreenToClient(host, ref location);
 
@@ -136,6 +147,20 @@ internal static class NativeGlass
             Math.Max(1, rect.Bottom - rect.Top),
             SwpFrameChanged | SwpShowWindow | SwpNoActivate);
         return true;
+    }
+
+    public static void ApplyToolWindowStyle(IntPtr handle)
+    {
+        if (handle == IntPtr.Zero)
+        {
+            return;
+        }
+
+        var exStyle = GetWindowLongPtr(handle, GwlExStyle).ToInt64();
+        exStyle |= WsExToolWindow;
+        exStyle &= ~WsExAppWindow;
+        _ = SetWindowLongPtr(handle, GwlExStyle, new IntPtr(exStyle));
+        _ = SetWindowPos(handle, IntPtr.Zero, 0, 0, 0, 0, SwpFrameChanged | SwpNoActivate | SwpNoZOrder);
     }
 
     public static void SetDesktopChildScreenBounds(IntPtr handle, Rectangle screenBounds)
@@ -155,6 +180,30 @@ internal static class NativeGlass
             Math.Max(1, screenBounds.Width),
             Math.Max(1, screenBounds.Height),
             SwpNoZOrder | SwpNoActivate);
+    }
+
+    public static void NotifyShellMoved(string source, string target, bool directory)
+    {
+        var flags = ShcnfPathW | ShcnfFlushNowait;
+        SHChangeNotify(directory ? ShcneRmdir : ShcneDelete, flags, source, null);
+        SHChangeNotify(directory ? ShcneMkdir : ShcneCreate, flags, target, null);
+        NotifyShellDirectory(Path.GetDirectoryName(source));
+        NotifyShellDirectory(Path.GetDirectoryName(target));
+
+        var host = FindDesktopHost();
+        if (host != IntPtr.Zero)
+        {
+            _ = InvalidateRect(host, IntPtr.Zero, true);
+            _ = UpdateWindow(host);
+        }
+    }
+
+    private static void NotifyShellDirectory(string? directory)
+    {
+        if (!string.IsNullOrWhiteSpace(directory))
+        {
+            SHChangeNotify(ShcneUpdateDir, ShcnfPathW | ShcnfFlushNowait, directory, null);
+        }
     }
 
     private static IntPtr FindDesktopHost()
@@ -218,6 +267,15 @@ internal static class NativeGlass
 
     [DllImport("user32.dll", SetLastError = true)]
     private static extern bool SetWindowPos(IntPtr windowHandle, IntPtr insertAfterHandle, int x, int y, int cx, int cy, int flags);
+
+    [DllImport("user32.dll", SetLastError = true)]
+    private static extern bool InvalidateRect(IntPtr windowHandle, IntPtr rect, bool erase);
+
+    [DllImport("user32.dll", SetLastError = true)]
+    private static extern bool UpdateWindow(IntPtr windowHandle);
+
+    [DllImport("shell32.dll", CharSet = CharSet.Unicode)]
+    private static extern void SHChangeNotify(int eventId, uint flags, string? item1, string? item2);
 
     [DllImport("user32.dll", SetLastError = true)]
     private static extern bool GetWindowRect(IntPtr windowHandle, out NativeRect rect);
