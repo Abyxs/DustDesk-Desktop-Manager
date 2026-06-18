@@ -1,0 +1,13 @@
+bin/
+obj/
+.tmp/
+release/
+Data/
+.dotnet/
+.nuget/
+.vs/
+*.user
+*.suo
+*.zip
+*.pdb
+*.log

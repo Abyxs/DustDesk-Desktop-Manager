@@ -1,0 +1,172 @@
+﻿using System.Text.Json.Serialization;
+
+namespace DustDesk;
+
+public sealed class AppConfig
+{
+    public bool DesktopWidgetTransparent { get; set; }
+    public bool DesktopTodoWidgetTransparent { get; set; }
+    public bool DesktopProjectWidgetTransparent { get; set; }
+    public bool DesktopLauncherWidgetTransparent { get; set; }
+    public bool DesktopLauncherWidgetSnap { get; set; }
+    public bool StartHiddenToTray { get; set; }
+    public string MainWindowHotKey { get; set; } = "Ctrl+Shift+K";
+    public bool? SearchAppData { get; set; } = true;
+    public bool? SearchDesktopFiles { get; set; } = true;
+    public bool? SearchStartMenuApps { get; set; } = true;
+    public bool? SearchProjectPaths { get; set; } = true;
+    public bool DesktopSearchWidgetTransparent { get; set; }
+    public WidgetPlacement? DesktopOrganizerWidget { get; set; }
+    public WidgetPlacement? DesktopTodoWidget { get; set; }
+    public WidgetPlacement? DesktopProjectWidget { get; set; }
+    public WidgetPlacement? DesktopLauncherWidget { get; set; }
+    public WidgetPlacement? DesktopSearchWidget { get; set; }
+    public List<DesktopNoteWidgetPlacement> DesktopNoteWidgets { get; set; } = new();
+
+    public List<DeskCategory> DesktopCategories { get; set; } = new()
+    {
+        new DeskCategory { Name = "工作" },
+        new DeskCategory { Name = "开发" },
+        new DeskCategory { Name = "游戏" },
+        new DeskCategory { Name = "工具" }
+    };
+}
+
+public class WidgetPlacement
+{
+    public bool Visible { get; set; }
+    public int X { get; set; }
+    public int Y { get; set; }
+    public int Width { get; set; }
+    public int Height { get; set; }
+}
+
+public sealed class DesktopNoteWidgetPlacement : WidgetPlacement
+{
+    public string NoteId { get; set; } = "";
+}
+
+public sealed class DeskCategory
+{
+    public string Name { get; set; } = "";
+    public bool IsCollapsed { get; set; }
+    public List<string> ItemPaths { get; set; } = new();
+
+    public override string ToString()
+    {
+        var state = IsCollapsed ? "折叠" : "展开";
+        return $"{Name} ({ItemPaths.Count}, {state})";
+    }
+}
+
+public sealed class TodoData
+{
+    public List<TodoItem> Items { get; set; } = new();
+    public List<TodoTagPreset> TagPresets { get; set; } = new();
+}
+
+public sealed class TodoTagPreset
+{
+    public string Name { get; set; } = "";
+    public int ColorArgb { get; set; }
+
+    public override string ToString() => Name;
+}
+
+public sealed class NoteData
+{
+    public List<NoteItem> Items { get; set; } = new();
+}
+
+public sealed class NoteItem
+{
+    public string Id { get; set; } = Guid.NewGuid().ToString("N");
+    public string Title { get; set; } = "note.md";
+    public string Text { get; set; } = "";
+    public int ColorArgb { get; set; } = unchecked((int)0xFFFFEC8E);
+    public int FontColorArgb { get; set; } = unchecked((int)0xFF2C261C);
+    public float FontSize { get; set; } = 13F;
+    public bool FontBold { get; set; }
+    public string? BackgroundImagePath { get; set; }
+    public bool ImageOnly { get; set; }
+    public DateTime CreatedAt { get; set; } = DateTime.Now;
+    public DateTime UpdatedAt { get; set; } = DateTime.Now;
+
+    public override string ToString() => Title;
+}
+
+public sealed class TodoItem
+{
+    public string Text { get; set; } = "";
+    public string Tag { get; set; } = "";
+    public string Note { get; set; } = "";
+    public bool Done { get; set; }
+    public DateTime CreatedAt { get; set; } = DateTime.Now;
+
+    public override string ToString() => Text;
+}
+
+public sealed class ProjectData
+{
+    public List<ProjectBoard> Projects { get; set; } = new();
+}
+
+public sealed class ProjectBoard
+{
+    public string Id { get; set; } = Guid.NewGuid().ToString("N");
+    public string Name { get; set; } = "";
+    public string ProjectPath { get; set; } = "";
+    public List<ProjectItem> Items { get; set; } = new();
+
+    public override string ToString() => Name;
+}
+
+public sealed class ProjectItem
+{
+    public string Title { get; set; } = "";
+    public ProjectStatus Status { get; set; } = ProjectStatus.Todo;
+    public DateTime? StartDate { get; set; }
+    public DateTime? EndDate { get; set; }
+    public int ProgressPercent { get; set; } = -1;
+    public string ProjectPath { get; set; } = "";
+    public List<ProjectSubItem> SubItems { get; set; } = new();
+
+    public override string ToString()
+    {
+        var progress = ProgressPercent >= 0 ? $"  {Math.Clamp(ProgressPercent, 0, 100)}%" : "";
+        var date = StartDate.HasValue || EndDate.HasValue
+            ? $"  {StartDate?.ToString("MM/dd") ?? "--"}-{EndDate?.ToString("MM/dd") ?? "--"}"
+            : "";
+        return $"{Title}{progress}{date}";
+    }
+}
+
+public sealed class ProjectSubItem
+{
+    public string Title { get; set; } = "";
+    public bool Done { get; set; }
+    public string FilePath { get; set; } = "";
+
+    public override string ToString() => Title;
+}
+
+[JsonConverter(typeof(JsonStringEnumConverter))]
+public enum ProjectStatus
+{
+    Todo,
+    Doing,
+    Done
+}
+
+public sealed class LaunchData
+{
+    public List<LaunchItem> Items { get; set; } = new();
+}
+
+public sealed class LaunchItem
+{
+    public string Name { get; set; } = "";
+    public string Path { get; set; } = "";
+
+    public override string ToString() => Name;
+}
