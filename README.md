@@ -62,18 +62,6 @@ DustDesk/
 └─ DustDesk.csproj      项目配置
 ```
 
-## GitHub 提交建议
-
-以下内容不建议提交：
-
-- `Data/`
-- `bin/`
-- `obj/`
-- `.tmp/`
-- `release/`
-- `*.zip`
-
-发布包请通过 GitHub Releases 上传，不要直接提交到源码仓库。
 
 ## 反馈
 
