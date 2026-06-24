@@ -72,4 +72,4 @@ DustDesk/
 
 问题反馈和咨询：抖音 `Aby081298`
 
-详情可查看：[Linux.do](https://linux.do/u/yuzhi/activity/pending)
+详情可查看：[Linux.do](https://linux.do/t/topic/2431301)
