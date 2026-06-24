@@ -4,28 +4,40 @@ namespace DustDesk;
 
 public sealed class AppConfig
 {
-    public bool DesktopWidgetTransparent { get; set; }
+    public bool DesktopWidgetTransparent { get; set; } = true;
     public bool DesktopOrganizerShowNames { get; set; }
     public int DesktopOrganizerIconSize { get; set; } = 48;
-    public bool DesktopTodoWidgetTransparent { get; set; }
-    public bool DesktopProjectWidgetTransparent { get; set; }
-    public bool DesktopLauncherWidgetTransparent { get; set; }
+    public bool DesktopTodoWidgetTransparent { get; set; } = true;
+    public bool DesktopProjectWidgetTransparent { get; set; } = true;
+    public bool DesktopLauncherWidgetTransparent { get; set; } = true;
+    public bool DesktopSystemMonitorWidgetTransparent { get; set; } = true;
+    public bool DesktopSystemMonitorShowDownload { get; set; } = true;
+    public bool DesktopSystemMonitorShowUpload { get; set; } = true;
+    public bool DesktopSystemMonitorShowMemory { get; set; } = true;
+    public bool DesktopSystemMonitorShowCpu { get; set; } = true;
+    public bool DesktopSystemMonitorShowDiskIo { get; set; } = true;
+    public bool DesktopSystemMonitorShowDiskSpace { get; set; } = true;
+    public bool DesktopSystemMonitorShowPing { get; set; } = true;
+    public bool DesktopSystemMonitorShowUptime { get; set; } = true;
+    public bool DesktopSystemMonitorShowProcessCount { get; set; } = true;
     public bool DesktopLauncherWidgetSnap { get; set; }
     public bool DesktopLauncherWidgetShowNames { get; set; } = true;
     public int DesktopLauncherWidgetIconSize { get; set; } = 48;
     public bool StartHiddenToTray { get; set; }
     public string MainWindowHotKey { get; set; } = "Ctrl+Shift+K";
+    public string DesktopOrganizerHotKey { get; set; } = "Ctrl+Shift+D";
     public bool? SearchAppData { get; set; } = true;
     public bool? SearchDesktopFiles { get; set; } = true;
     public bool? SearchStartMenuApps { get; set; } = true;
     public bool? SearchProjectPaths { get; set; } = true;
     public bool? SearchCustomPaths { get; set; } = true;
     public List<string> SearchCustomRoots { get; set; } = new();
-    public bool DesktopSearchWidgetTransparent { get; set; }
+    public bool DesktopSearchWidgetTransparent { get; set; } = true;
     public WidgetPlacement? DesktopOrganizerWidget { get; set; }
     public WidgetPlacement? DesktopTodoWidget { get; set; }
     public WidgetPlacement? DesktopProjectWidget { get; set; }
     public WidgetPlacement? DesktopLauncherWidget { get; set; }
+    public WidgetPlacement? DesktopSystemMonitorWidget { get; set; }
     public WidgetPlacement? DesktopSearchWidget { get; set; }
     public List<DesktopNoteWidgetPlacement> DesktopNoteWidgets { get; set; } = new();
 

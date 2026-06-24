@@ -182,6 +182,30 @@ internal static class NativeGlass
             SwpNoZOrder | SwpNoActivate);
     }
 
+    public static Rectangle GetWindowScreenBounds(IntPtr handle, Rectangle fallback)
+    {
+        if (handle == IntPtr.Zero)
+        {
+            return fallback;
+        }
+
+        if (GetWindowRect(handle, out var rect))
+        {
+            return new Rectangle(rect.Left, rect.Top, Math.Max(1, rect.Right - rect.Left), Math.Max(1, rect.Bottom - rect.Top));
+        }
+
+        var parent = GetParent(handle);
+        if (parent == IntPtr.Zero)
+        {
+            return fallback;
+        }
+
+        var location = new NativePoint { X = fallback.X, Y = fallback.Y };
+        return ClientToScreen(parent, ref location)
+            ? new Rectangle(location.X, location.Y, Math.Max(1, fallback.Width), Math.Max(1, fallback.Height))
+            : fallback;
+    }
+
     public static void NotifyShellMoved(string source, string target, bool directory)
     {
         var flags = ShcnfPathW | ShcnfFlushNowait;
@@ -282,6 +306,9 @@ internal static class NativeGlass
 
     [DllImport("user32.dll", SetLastError = true)]
     private static extern bool ScreenToClient(IntPtr windowHandle, ref NativePoint point);
+
+    [DllImport("user32.dll", SetLastError = true)]
+    private static extern bool ClientToScreen(IntPtr windowHandle, ref NativePoint point);
 
     [DllImport("user32.dll", SetLastError = true, CharSet = CharSet.Auto)]
     private static extern IntPtr FindWindow(string className, string? windowName);
