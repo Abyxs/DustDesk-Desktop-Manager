@@ -2,7 +2,6 @@ bin/
 obj/
 .tmp/
 release/
-images/
 Data/
 .dotnet/
 .nuget/
