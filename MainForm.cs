@@ -5376,15 +5376,26 @@ public sealed class MainForm : Form
         actions.Controls.AddRange(new Control[] { copyButton, deleteButton, clearButton, refreshButton, pinButton });
         page.Controls.Add(actions, 0, 1);
 
+        var pathLabel = new Label
+        {
+            Dock = DockStyle.Top,
+            Height = 28,
+            Text = $"保存路径：{_store.ClipboardPath}",
+            ForeColor = TextColorSubtle,
+            TextAlign = ContentAlignment.MiddleLeft,
+            AutoEllipsis = true
+        };
         var layout = new TableLayoutPanel
         {
             Dock = DockStyle.Fill,
             ColumnCount = 2,
-            RowCount = 1,
+            RowCount = 2,
             BackColor = Color.Transparent
         };
         layout.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 360));
         layout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+        layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 32));
+        layout.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
 
         var list = CreateListBox();
         list.DrawMode = DrawMode.OwnerDrawFixed;
@@ -5426,8 +5437,10 @@ public sealed class MainForm : Form
         previewPanel.Controls.Add(previewImage);
         previewPanel.Controls.Add(statusLabel);
 
-        layout.Controls.Add(CreateGroup("历史记录", list), 0, 0);
-        layout.Controls.Add(CreateGroup("预览", previewPanel), 1, 0);
+        layout.Controls.Add(pathLabel, 0, 0);
+        layout.SetColumnSpan(pathLabel, 2);
+        layout.Controls.Add(CreateGroup("历史记录", list), 0, 1);
+        layout.Controls.Add(CreateGroup("预览", previewPanel), 1, 1);
         page.Controls.Add(layout, 0, 2);
 
         ClipboardHistoryItem? CurrentItem() => list.SelectedItem as ClipboardHistoryItem;
@@ -17071,6 +17084,7 @@ internal sealed class DesktopClipboardWidgetView : Control
     private readonly ToolStripMenuItem _topMostMenuItem = new("置顶");
     private readonly ToolStripMenuItem _lockItemMenuItem = new("锁定");
     private readonly ToolStripMenuItem _pinItemMenuItem = new("置顶");
+    private readonly ToolStripMenuItem _deleteItemMenuItem = new("删除");
     private readonly ClipboardPreviewPopup _previewPopup = new();
     private readonly List<Image> _menuItemImages = new();
     private readonly System.Windows.Forms.Timer _menuDismissTimer = new() { Interval = 40 };
@@ -17083,6 +17097,7 @@ internal sealed class DesktopClipboardWidgetView : Control
     private Rectangle _resizeRect;
     private ClipboardHistoryItem? _selectedItem;
     private ClipboardHistoryItem? _hoverItem;
+    private int _scrollOffset;
     private bool _transparent;
     private bool _positionLocked;
     private bool _topMost;
@@ -17110,6 +17125,8 @@ internal sealed class DesktopClipboardWidgetView : Control
         using var settingsIcon = LoadClipboardWidgetImage("images", "zhuomianguinarongqi", "shezhi.png");
         _settingsIcon = settingsIcon is null ? null : TintImage(settingsIcon, Color.FromArgb(130, 180, 255));
         SetStyle(ControlStyles.AllPaintingInWmPaint | ControlStyles.UserPaint | ControlStyles.OptimizedDoubleBuffer | ControlStyles.ResizeRedraw, true);
+        SetStyle(ControlStyles.Selectable, true);
+        TabStop = true;
 
         var refreshMenuItem = _menu.Items.Add("刷新", null, (_, _) => RefreshRequested?.Invoke());
         SetMenuIcon(refreshMenuItem, "zicaidan", "7.png");
@@ -17200,6 +17217,9 @@ internal sealed class DesktopClipboardWidgetView : Control
         };
         _itemMenu.Items.Add(_lockItemMenuItem);
         _itemMenu.Items.Add(_pinItemMenuItem);
+        _deleteItemMenuItem.Click += (_, _) => DeleteSelectedItem();
+        _itemMenu.Items.Add(new ToolStripSeparator());
+        _itemMenu.Items.Add(_deleteItemMenuItem);
         _itemMenu.Opening += (_, e) =>
         {
             e.Cancel = _selectedItem is null;
@@ -17212,6 +17232,7 @@ internal sealed class DesktopClipboardWidgetView : Control
             _lockItemMenuItem.Text = _selectedItem.IsLocked ? "已锁定" : "锁定";
             _pinItemMenuItem.Checked = _selectedItem.IsPinned;
             _pinItemMenuItem.Text = _selectedItem.IsPinned ? "已置顶" : "置顶";
+            _deleteItemMenuItem.Enabled = true;
         };
     }
 
@@ -17240,6 +17261,7 @@ internal sealed class DesktopClipboardWidgetView : Control
             _previewPopup.Hide();
         }
 
+        ClampScrollOffset();
         Invalidate();
     }
 
@@ -17253,6 +17275,7 @@ internal sealed class DesktopClipboardWidgetView : Control
 
         _hoverItem = null;
         _previewPopup.Hide();
+        ClampScrollOffset();
         Invalidate();
     }
 
@@ -17297,6 +17320,7 @@ internal sealed class DesktopClipboardWidgetView : Control
 
     protected override void OnMouseDown(MouseEventArgs e)
     {
+        Focus();
         if (_settingsRect.Contains(e.Location))
         {
             _menu.Show(this, _settingsRect.Left, _settingsRect.Bottom + 4);
@@ -17355,6 +17379,11 @@ internal sealed class DesktopClipboardWidgetView : Control
 
     protected override void OnMouseMove(MouseEventArgs e)
     {
+        if (!Focused)
+        {
+            Focus();
+        }
+
         var itemHit = _itemAreas.FirstOrDefault(item => item.Rect.Contains(e.Location));
         if (itemHit.Item is not null)
         {
@@ -17381,6 +17410,21 @@ internal sealed class DesktopClipboardWidgetView : Control
         _hoverItem = null;
         _previewPopup.Hide();
         base.OnMouseLeave(e);
+    }
+
+    protected override void OnMouseWheel(MouseEventArgs e)
+    {
+        var visibleCount = VisibleItemCount(new Rectangle(14, 58, Math.Max(1, Width - 28), Math.Max(1, Height - 72)));
+        var maxOffset = Math.Max(0, _clipboard.Items.Count - visibleCount);
+        if (maxOffset == 0)
+        {
+            base.OnMouseWheel(e);
+            return;
+        }
+
+        _scrollOffset = Math.Clamp(_scrollOffset + (e.Delta < 0 ? 1 : -1), 0, maxOffset);
+        Invalidate();
+        base.OnMouseWheel(e);
     }
 
     protected override void OnPaint(PaintEventArgs e)
@@ -17458,11 +17502,12 @@ internal sealed class DesktopClipboardWidgetView : Control
             return;
         }
 
-        var rowHeight = Math.Clamp((area.Height - 8) / Math.Min(5, _clipboard.Items.Count), 46, 62);
-        var count = Math.Min(5, Math.Max(1, area.Height / rowHeight));
-        for (var i = 0; i < Math.Min(count, _clipboard.Items.Count); i++)
+        const int rowHeight = 54;
+        var count = VisibleItemCount(area);
+        ClampScrollOffset(count);
+        for (var i = 0; i < Math.Min(count, _clipboard.Items.Count - _scrollOffset); i++)
         {
-            var item = _clipboard.Items[i];
+            var item = _clipboard.Items[_scrollOffset + i];
             var row = new Rectangle(area.X, area.Y + i * rowHeight, area.Width, rowHeight - 8);
             var selected = ReferenceEquals(item, _selectedItem);
             using (var fill = new SolidBrush(selected ? Color.FromArgb(90, 46, 126, 246) : Color.FromArgb(86, 35, 45, 60)))
@@ -17490,6 +17535,18 @@ internal sealed class DesktopClipboardWidgetView : Control
         }
     }
 
+    private static int VisibleItemCount(Rectangle area)
+    {
+        const int rowHeight = 54;
+        return Math.Max(1, area.Height / rowHeight);
+    }
+
+    private void ClampScrollOffset(int? visibleCount = null)
+    {
+        var count = visibleCount ?? VisibleItemCount(new Rectangle(14, 58, Math.Max(1, Width - 28), Math.Max(1, Height - 72)));
+        _scrollOffset = Math.Clamp(_scrollOffset, 0, Math.Max(0, _clipboard.Items.Count - count));
+    }
+
     private void MoveSelectedItemForPin()
     {
         if (_selectedItem is null || !_clipboard.Items.Remove(_selectedItem))
@@ -17501,6 +17558,31 @@ internal sealed class DesktopClipboardWidgetView : Control
             ? 0
             : _clipboard.Items.TakeWhile(item => item.IsPinned).Count();
         _clipboard.Items.Insert(insertIndex, _selectedItem);
+    }
+
+    private void DeleteSelectedItem()
+    {
+        if (_selectedItem is null)
+        {
+            return;
+        }
+
+        var deleted = _selectedItem;
+        if (!_clipboard.Items.Remove(deleted))
+        {
+            return;
+        }
+
+        if (ReferenceEquals(_hoverItem, deleted))
+        {
+            _hoverItem = null;
+            _previewPopup.Hide();
+        }
+
+        _selectedItem = null;
+        ClampScrollOffset();
+        ClipboardChanged?.Invoke();
+        Invalidate();
     }
 
     private void DrawResizeGrip(Graphics g, Rectangle card)
