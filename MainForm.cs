@@ -6247,11 +6247,17 @@ public sealed class MainForm : Form
             return;
         }
 
-        var width = Math.Max(1, content.ClientSize.Width);
+        var width = Math.Max(1, row.ClientSize.Width - content.Left - 10);
+        content.Width = width;
         flow.Width = width;
         flow.PerformLayout();
         var preferred = flow.GetPreferredSize(new Size(width, 0));
-        var height = Math.Max(minHeight, preferred.Height + 6);
+        if (flow.Dock == DockStyle.None)
+        {
+            flow.Height = preferred.Height;
+        }
+
+        var height = Math.Max(minHeight, flow.Top + preferred.Height + 10);
         if (Math.Abs(stack.RowStyles[rowIndex].Height - height) < 1)
         {
             return;
