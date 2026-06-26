@@ -149,6 +149,29 @@ internal static class NativeGlass
         return true;
     }
 
+    public static void DetachFromDesktop(IntPtr handle, Rectangle screenBounds)
+    {
+        if (handle == IntPtr.Zero)
+        {
+            return;
+        }
+
+        _ = SetParent(handle, IntPtr.Zero);
+        var style = GetWindowLongPtr(handle, GwlStyle).ToInt64();
+        style &= ~WsChild;
+        style |= WsPopup | WsVisible;
+        _ = SetWindowLongPtr(handle, GwlStyle, new IntPtr(style));
+        ApplyToolWindowStyle(handle);
+        _ = SetWindowPos(
+            handle,
+            IntPtr.Zero,
+            screenBounds.X,
+            screenBounds.Y,
+            Math.Max(1, screenBounds.Width),
+            Math.Max(1, screenBounds.Height),
+            SwpFrameChanged | SwpShowWindow);
+    }
+
     public static void ApplyToolWindowStyle(IntPtr handle)
     {
         if (handle == IntPtr.Zero)

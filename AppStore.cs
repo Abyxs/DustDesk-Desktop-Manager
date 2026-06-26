@@ -31,11 +31,13 @@ public sealed class AppStore
     public string LaunchPath => Path.Combine(DataDirectory, "launch.json");
     public string NotePath => Path.Combine(DataDirectory, "note.md");
     public string NotesPath => Path.Combine(DataDirectory, "note.json");
+    public string ClipboardPath => Path.Combine(DataDirectory, "clipboard.json");
 
     public AppConfig LoadConfig() => LoadJson(ConfigPath, () => new AppConfig());
     public TodoData LoadTodos() => LoadJson(TodoPath, () => new TodoData());
     public ProjectData LoadProjects() => LoadJson(ProjectPath, () => new ProjectData());
     public LaunchData LoadLaunchers() => LoadJson(LaunchPath, () => new LaunchData());
+    public ClipboardData LoadClipboard() => LoadJson(ClipboardPath, () => new ClipboardData());
     public NoteData LoadNotes()
     {
         if (File.Exists(NotesPath))
@@ -55,6 +57,7 @@ public sealed class AppStore
     public void SaveTodos(TodoData data) => SaveJson(TodoPath, data);
     public void SaveProjects(ProjectData data) => SaveJson(ProjectPath, data);
     public void SaveLaunchers(LaunchData data) => SaveJson(LaunchPath, data);
+    public void SaveClipboard(ClipboardData data) => SaveJson(ClipboardPath, data);
     public void SaveNotes(NoteData data)
     {
         EnsureDefaultNote(data);
@@ -163,7 +166,7 @@ public sealed class AppStore
     private static bool HasDataFiles(string directory)
     {
         return Directory.Exists(directory)
-            && new[] { "config.json", "todo.json", "project.json", "launch.json", "note.json", "note.md" }
+            && new[] { "config.json", "todo.json", "project.json", "launch.json", "note.json", "note.md", "clipboard.json" }
                 .Any(file => File.Exists(Path.Combine(directory, file)));
     }
 

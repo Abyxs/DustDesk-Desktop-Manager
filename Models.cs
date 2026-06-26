@@ -11,6 +11,7 @@ public sealed class AppConfig
     public bool DesktopProjectWidgetTransparent { get; set; } = true;
     public bool DesktopLauncherWidgetTransparent { get; set; } = true;
     public bool DesktopSystemMonitorWidgetTransparent { get; set; } = true;
+    public bool DesktopClipboardWidgetTransparent { get; set; } = true;
     public bool DesktopSystemMonitorShowDownload { get; set; } = true;
     public bool DesktopSystemMonitorShowUpload { get; set; } = true;
     public bool DesktopSystemMonitorShowMemory { get; set; } = true;
@@ -19,13 +20,20 @@ public sealed class AppConfig
     public bool DesktopSystemMonitorShowDiskSpace { get; set; } = true;
     public bool DesktopSystemMonitorShowPing { get; set; } = true;
     public bool DesktopSystemMonitorShowUptime { get; set; } = true;
-    public bool DesktopSystemMonitorShowProcessCount { get; set; } = true;
     public bool DesktopLauncherWidgetSnap { get; set; }
     public bool DesktopLauncherWidgetShowNames { get; set; } = true;
     public int DesktopLauncherWidgetIconSize { get; set; } = 48;
     public bool StartHiddenToTray { get; set; }
     public string MainWindowHotKey { get; set; } = "Ctrl+Shift+K";
     public string DesktopOrganizerHotKey { get; set; } = "Ctrl+Shift+D";
+    public bool DesktopHotKeyToggleSearch { get; set; }
+    public bool DesktopHotKeyToggleOrganizer { get; set; } = true;
+    public bool DesktopHotKeyToggleTodo { get; set; }
+    public bool DesktopHotKeyToggleNote { get; set; }
+    public bool DesktopHotKeyToggleProject { get; set; }
+    public bool DesktopHotKeyToggleLauncher { get; set; }
+    public bool DesktopHotKeyToggleSystemMonitor { get; set; }
+    public bool DesktopHotKeyToggleClipboard { get; set; }
     public bool? SearchAppData { get; set; } = true;
     public bool? SearchDesktopFiles { get; set; } = true;
     public bool? SearchStartMenuApps { get; set; } = true;
@@ -39,6 +47,7 @@ public sealed class AppConfig
     public WidgetPlacement? DesktopLauncherWidget { get; set; }
     public WidgetPlacement? DesktopSystemMonitorWidget { get; set; }
     public WidgetPlacement? DesktopSearchWidget { get; set; }
+    public WidgetPlacement? DesktopClipboardWidget { get; set; }
     public List<DesktopNoteWidgetPlacement> DesktopNoteWidgets { get; set; } = new();
 
     public List<DeskCategory> DesktopCategories { get; set; } = new()
@@ -53,6 +62,8 @@ public sealed class AppConfig
 public class WidgetPlacement
 {
     public bool Visible { get; set; }
+    public bool Locked { get; set; }
+    public bool TopMost { get; set; }
     public int X { get; set; }
     public int Y { get; set; }
     public int Width { get; set; }
@@ -187,4 +198,33 @@ public sealed class LaunchItem
     public string Path { get; set; } = "";
 
     public override string ToString() => Name;
+}
+
+public sealed class ClipboardData
+{
+    public List<ClipboardHistoryItem> Items { get; set; } = new();
+}
+
+public sealed class ClipboardHistoryItem
+{
+    public string Id { get; set; } = Guid.NewGuid().ToString("N");
+    public ClipboardHistoryKind Kind { get; set; }
+    public string Text { get; set; } = "";
+    public string ImagePngBase64 { get; set; } = "";
+    public DateTime CreatedAt { get; set; } = DateTime.Now;
+    public bool IsLocked { get; set; }
+    public bool IsPinned { get; set; }
+
+    public override string ToString()
+    {
+        var type = Kind == ClipboardHistoryKind.Image ? "图片" : "文字";
+        return $"{type}  {CreatedAt:yyyy-MM-dd HH:mm:ss}";
+    }
+}
+
+[JsonConverter(typeof(JsonStringEnumConverter))]
+public enum ClipboardHistoryKind
+{
+    Text,
+    Image
 }
