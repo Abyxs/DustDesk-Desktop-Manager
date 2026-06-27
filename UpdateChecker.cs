@@ -4,7 +4,7 @@ using System.Text.Json.Serialization;
 
 namespace DustDesk;
 
-internal sealed record UpdateInfo(string VersionText, string ReleaseUrl, string DownloadUrl);
+internal sealed record UpdateInfo(string VersionText, string ReleaseUrl, string? DownloadUrl);
 
 internal static class UpdateChecker
 {
@@ -63,7 +63,7 @@ internal static class UpdateChecker
             .FirstOrDefault()
             ?.BrowserDownloadUrl;
 
-        return new UpdateInfo(FormatVersion(latestVersion), releaseUrl, string.IsNullOrWhiteSpace(downloadUrl) ? releaseUrl : downloadUrl);
+        return new UpdateInfo(FormatVersion(latestVersion), releaseUrl, string.IsNullOrWhiteSpace(downloadUrl) ? null : downloadUrl);
     }
 
     private static bool TryParseVersion(string? text, out Version version)

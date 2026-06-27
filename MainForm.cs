@@ -6458,17 +6458,49 @@ public sealed class MainForm : Form
 
             var result = MessageBox.Show(
                 this,
-                $"发现新版本 v{update.VersionText}。\n当前版本 v{UpdateChecker.CurrentVersionText}。\n\n是否打开下载地址？下载后请退出 DustDesk，再解压覆盖旧目录。",
+                $"发现新版本 v{update.VersionText}。\n当前版本 v{UpdateChecker.CurrentVersionText}。\n\n是否立即下载并自动安装？\n安装时会退出 DustDesk，完成后自动重启。",
                 "DustDesk 更新",
                 MessageBoxButtons.YesNo,
                 MessageBoxIcon.Information);
             if (result == DialogResult.Yes)
             {
-                OpenUrl(update.DownloadUrl);
+                await InstallUpdateAsync(update);
             }
         }
         catch
         {
+        }
+    }
+
+    private async Task InstallUpdateAsync(UpdateInfo update)
+    {
+        if (string.IsNullOrWhiteSpace(update.DownloadUrl))
+        {
+            MessageBox.Show(this, "这个版本没有找到可自动安装的压缩包，将打开下载页面。", "DustDesk 更新", MessageBoxButtons.OK, MessageBoxIcon.Information);
+            OpenUrl(update.ReleaseUrl);
+            return;
+        }
+
+        UseWaitCursor = true;
+        try
+        {
+            var scriptPath = await UpdateInstaller.PrepareAsync(
+                update,
+                AppContext.BaseDirectory,
+                Application.ExecutablePath,
+                Environment.ProcessId);
+            UpdateInstaller.Start(scriptPath);
+            _exitRequested = true;
+            _closingApp = true;
+            _trayIcon.Visible = false;
+            Close();
+            Application.ExitThread();
+        }
+        catch (Exception ex)
+        {
+            UseWaitCursor = false;
+            MessageBox.Show(this, $"自动更新失败：{ex.Message}\n\n将打开下载页面。", "DustDesk 更新", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+            OpenUrl(update.ReleaseUrl);
         }
     }
 
