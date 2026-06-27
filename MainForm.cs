@@ -87,6 +87,7 @@ public sealed class MainForm : Form
     private readonly List<DesktopOrganizerWidgetForm> _desktopOrganizerSplitWidgets = new();
     private readonly Dictionary<DesktopOrganizerWidgetForm, List<DeskCategory>> _desktopOrganizerSplitWidgetCategories = new();
     private readonly HashSet<DeskCategory> _splitDesktopCategories = new();
+    private readonly HashSet<string> _desktopHotKeyHiddenWidgetKeys = new(StringComparer.Ordinal);
     private readonly List<DesktopProjectWidgetForm> _desktopProjectSplitWidgets = new();
     private readonly HashSet<string> _splitProjectIds = new(StringComparer.Ordinal);
     private ResizeMessageFilter? _resizeFilter;
@@ -890,30 +891,41 @@ public sealed class MainForm : Form
             targets = DesktopHotKeyTargets().Where(item => item.IsSelected()).ToArray();
         }
 
-        var allVisible = targets.All(item => item.IsVisible());
-        foreach (var target in targets)
+        if (_desktopHotKeyHiddenWidgetKeys.Count > 0)
         {
-            if (allVisible)
-            {
-                target.Hide();
-            }
-            else
+            foreach (var target in targets.Where(item => _desktopHotKeyHiddenWidgetKeys.Contains(item.Key)))
             {
                 target.Show();
             }
+
+            _desktopHotKeyHiddenWidgetKeys.Clear();
+            return;
+        }
+
+        var visibleTargets = targets.Where(item => item.IsVisible()).ToArray();
+        if (visibleTargets.Length > 0)
+        {
+            _desktopHotKeyHiddenWidgetKeys.Clear();
+            foreach (var target in visibleTargets)
+            {
+                _desktopHotKeyHiddenWidgetKeys.Add(target.Key);
+                target.Hide();
+            }
+
+            return;
         }
     }
 
-    private IEnumerable<(Func<bool> IsSelected, Func<bool> IsVisible, Action Show, Action Hide)> DesktopHotKeyTargets()
+    private IEnumerable<(string Key, Func<bool> IsSelected, Func<bool> IsVisible, Action Show, Action Hide)> DesktopHotKeyTargets()
     {
-        yield return (() => _config.DesktopHotKeyToggleSearch, () => _config.DesktopSearchWidget?.Visible == true, () => ShowDesktopSearchWidget(centerOnScreen: true, minimizeMain: true), CloseDesktopSearchWidget);
-        yield return (() => _config.DesktopHotKeyToggleOrganizer, () => _config.DesktopOrganizerWidget?.Visible == true, () => ShowDesktopOrganizerWidget(), CloseDesktopOrganizerWidget);
-        yield return (() => _config.DesktopHotKeyToggleTodo, () => _config.DesktopTodoWidget?.Visible == true, () => ShowDesktopTodoWidget(), CloseDesktopTodoWidget);
-        yield return (() => _config.DesktopHotKeyToggleNote, HasVisibleDesktopNoteWidgets, ShowDesktopNoteWidgets, CloseDesktopNoteWidgets);
-        yield return (() => _config.DesktopHotKeyToggleProject, () => _config.DesktopProjectWidget?.Visible == true, () => ShowDesktopProjectWidget(), CloseDesktopProjectWidget);
-        yield return (() => _config.DesktopHotKeyToggleLauncher, () => _config.DesktopLauncherWidget?.Visible == true, () => ShowDesktopLauncherWidget(), CloseDesktopLauncherWidget);
-        yield return (() => _config.DesktopHotKeyToggleSystemMonitor, () => _config.DesktopSystemMonitorWidget?.Visible == true, () => ShowDesktopSystemMonitorWidget(), CloseDesktopSystemMonitorWidget);
-        yield return (() => _config.DesktopHotKeyToggleClipboard, () => _config.DesktopClipboardWidget?.Visible == true, () => ShowDesktopClipboardWidget(), CloseDesktopClipboardWidget);
+        yield return ("search", () => _config.DesktopHotKeyToggleSearch, () => _config.DesktopSearchWidget?.Visible == true, () => ShowDesktopSearchWidget(centerOnScreen: true, minimizeMain: true), CloseDesktopSearchWidget);
+        yield return ("organizer", () => _config.DesktopHotKeyToggleOrganizer, () => _config.DesktopOrganizerWidget?.Visible == true, () => ShowDesktopOrganizerWidget(), CloseDesktopOrganizerWidget);
+        yield return ("todo", () => _config.DesktopHotKeyToggleTodo, () => _config.DesktopTodoWidget?.Visible == true, () => ShowDesktopTodoWidget(), CloseDesktopTodoWidget);
+        yield return ("note", () => _config.DesktopHotKeyToggleNote, HasVisibleDesktopNoteWidgets, ShowDesktopNoteWidgets, HideDesktopNoteWidgetsForHotKey);
+        yield return ("project", () => _config.DesktopHotKeyToggleProject, () => _config.DesktopProjectWidget?.Visible == true, () => ShowDesktopProjectWidget(), CloseDesktopProjectWidget);
+        yield return ("launcher", () => _config.DesktopHotKeyToggleLauncher, () => _config.DesktopLauncherWidget?.Visible == true, () => ShowDesktopLauncherWidget(), CloseDesktopLauncherWidget);
+        yield return ("monitor", () => _config.DesktopHotKeyToggleSystemMonitor, () => _config.DesktopSystemMonitorWidget?.Visible == true, () => ShowDesktopSystemMonitorWidget(), CloseDesktopSystemMonitorWidget);
+        yield return ("clipboard", () => _config.DesktopHotKeyToggleClipboard, () => _config.DesktopClipboardWidget?.Visible == true, () => ShowDesktopClipboardWidget(), CloseDesktopClipboardWidget);
     }
 
     private static bool TryParseHotKey(string? text, out uint modifiers, out Keys key)
@@ -1309,6 +1321,25 @@ public sealed class MainForm : Form
         }
 
         _store.SaveConfig(_config);
+        _closingDesktopNoteWidgets = true;
+        try
+        {
+            foreach (var widget in _desktopNoteWidgets.ToArray())
+            {
+                if (!widget.IsDisposed)
+                {
+                    widget.Close();
+                }
+            }
+        }
+        finally
+        {
+            _closingDesktopNoteWidgets = false;
+        }
+    }
+
+    private void HideDesktopNoteWidgetsForHotKey()
+    {
         _closingDesktopNoteWidgets = true;
         try
         {
