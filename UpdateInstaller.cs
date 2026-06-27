@@ -4,15 +4,24 @@ using System.Text;
 
 namespace DustDesk;
 
+internal sealed record UpdateInstallProgress(string Message, int? Percent = null);
+
 internal static class UpdateInstaller
 {
-    public static async Task<string> PrepareAsync(UpdateInfo update, string targetDirectory, string executablePath, int processId, CancellationToken cancellationToken = default)
+    public static async Task<string> PrepareAsync(
+        UpdateInfo update,
+        string targetDirectory,
+        string executablePath,
+        int processId,
+        IProgress<UpdateInstallProgress>? progress = null,
+        CancellationToken cancellationToken = default)
     {
         if (string.IsNullOrWhiteSpace(update.DownloadUrl))
         {
             throw new InvalidOperationException("当前 Release 没有可自动安装的下载包。");
         }
 
+        progress?.Report(new UpdateInstallProgress("正在准备更新..."));
         targetDirectory = Path.GetFullPath(targetDirectory);
         executablePath = Path.GetFullPath(executablePath);
 
@@ -22,10 +31,13 @@ internal static class UpdateInstaller
         Directory.CreateDirectory(updateRoot);
         Directory.CreateDirectory(extractRoot);
 
-        await DownloadAsync(update.DownloadUrl, zipPath, cancellationToken);
+        await DownloadAsync(update.DownloadUrl, zipPath, progress, cancellationToken);
+        progress?.Report(new UpdateInstallProgress("正在解压安装包..."));
         ZipFile.ExtractToDirectory(zipPath, extractRoot, overwriteFiles: true);
 
+        progress?.Report(new UpdateInstallProgress("正在校验安装包..."));
         var packageRoot = FindPackageRoot(extractRoot);
+        progress?.Report(new UpdateInstallProgress("正在准备替换旧版本..."));
         return WriteInstallScript(updateRoot, packageRoot, targetDirectory, executablePath, processId);
     }
 
@@ -39,7 +51,11 @@ internal static class UpdateInstaller
         });
     }
 
-    private static async Task DownloadAsync(string url, string targetPath, CancellationToken cancellationToken)
+    private static async Task DownloadAsync(
+        string url,
+        string targetPath,
+        IProgress<UpdateInstallProgress>? progress,
+        CancellationToken cancellationToken)
     {
         using var httpClient = new HttpClient
         {
@@ -48,12 +64,46 @@ internal static class UpdateInstaller
         using var request = new HttpRequestMessage(HttpMethod.Get, url);
         request.Headers.UserAgent.ParseAdd($"DustDesk/{UpdateChecker.CurrentVersionText}");
 
+        progress?.Report(new UpdateInstallProgress("正在连接下载服务器..."));
         using var response = await httpClient.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, cancellationToken);
         response.EnsureSuccessStatusCode();
 
+        var totalBytes = response.Content.Headers.ContentLength;
         await using var input = await response.Content.ReadAsStreamAsync(cancellationToken);
-        await using var output = File.Create(targetPath);
-        await input.CopyToAsync(output, cancellationToken);
+        await using var output = new FileStream(targetPath, FileMode.Create, FileAccess.Write, FileShare.None, 81920, useAsync: true);
+
+        var buffer = new byte[81920];
+        long downloadedBytes = 0;
+        var lastPercent = -1;
+        progress?.Report(new UpdateInstallProgress("正在下载更新包...", totalBytes > 0 ? 0 : null));
+
+        while (true)
+        {
+            var read = await input.ReadAsync(buffer.AsMemory(0, buffer.Length), cancellationToken);
+            if (read == 0)
+            {
+                break;
+            }
+
+            await output.WriteAsync(buffer.AsMemory(0, read), cancellationToken);
+            downloadedBytes += read;
+
+            if (totalBytes is > 0)
+            {
+                var percent = (int)Math.Clamp(downloadedBytes * 100 / totalBytes.Value, 0, 100);
+                if (percent != lastPercent)
+                {
+                    lastPercent = percent;
+                    progress?.Report(new UpdateInstallProgress($"正在下载更新包... {percent}%", percent));
+                }
+            }
+            else
+            {
+                progress?.Report(new UpdateInstallProgress($"正在下载更新包... {FormatBytes(downloadedBytes)}"));
+            }
+        }
+
+        progress?.Report(new UpdateInstallProgress("下载完成", 100));
     }
 
     private static string FindPackageRoot(string extractRoot)
@@ -73,6 +123,13 @@ internal static class UpdateInstaller
         }
 
         return Path.GetDirectoryName(executable) ?? extractRoot;
+    }
+
+    private static string FormatBytes(long bytes)
+    {
+        return bytes >= 1024 * 1024
+            ? $"{bytes / 1024d / 1024d:0.0} MB"
+            : $"{bytes / 1024d:0.0} KB";
     }
 
     private static string WriteInstallScript(string updateRoot, string sourceDirectory, string targetDirectory, string executablePath, int processId)

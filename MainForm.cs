@@ -6513,13 +6513,20 @@ public sealed class MainForm : Form
         }
 
         UseWaitCursor = true;
+        using var progressForm = new UpdateProgressForm(update);
         try
         {
+            progressForm.Show(this);
+            progressForm.SetProgress(new UpdateInstallProgress("正在准备更新..."));
+            var progress = new Progress<UpdateInstallProgress>(progressForm.SetProgress);
             var scriptPath = await UpdateInstaller.PrepareAsync(
                 update,
                 AppContext.BaseDirectory,
                 Application.ExecutablePath,
-                Environment.ProcessId);
+                Environment.ProcessId,
+                progress);
+            progressForm.SetProgress(new UpdateInstallProgress("正在替换旧版本并重启..."));
+            await Task.Delay(600);
             UpdateInstaller.Start(scriptPath);
             _exitRequested = true;
             _closingApp = true;
@@ -6530,6 +6537,11 @@ public sealed class MainForm : Form
         catch (Exception ex)
         {
             UseWaitCursor = false;
+            if (!progressForm.IsDisposed)
+            {
+                progressForm.Close();
+            }
+
             MessageBox.Show(this, $"自动更新失败：{ex.Message}\n\n将打开下载页面。", "DustDesk 更新", MessageBoxButtons.OK, MessageBoxIcon.Warning);
             OpenUrl(update.ReleaseUrl);
         }
@@ -23714,7 +23726,6 @@ internal static class GraphicsExtensions
         return path;
     }
 }
-
 
 
 
