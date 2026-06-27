@@ -1,4 +1,4 @@
-﻿using System.Diagnostics;
+using System.Diagnostics;
 using System.Drawing;
 using System.Drawing.Drawing2D;
 using System.Globalization;
@@ -97,6 +97,7 @@ public sealed class MainForm : Form
     private NoteItem? _pendingNoteSelection;
     private FormWindowState _lastWindowState;
     private System.Windows.Forms.Timer? _mainResizeTimer;
+    private System.Windows.Forms.Timer? _todoReminderTimer;
     private Rectangle _mainResizeStartBounds;
     private Point _mainResizeStartCursor;
     private bool _mainResizing;
@@ -132,6 +133,8 @@ public sealed class MainForm : Form
         _hotKeyWindow = new HotKeyMessageWindow(HandleGlobalHotKey);
 
         _config = _store.LoadConfig();
+        DesktopWidgetStyle.OpacityPercent = _config.DesktopWidgetOpacity;
+        DesktopWidgetStyle.OpacityChanged += HandleDesktopWidgetOpacityChanged;
         if (EnsureDesktopWidgetsTransparent())
         {
             _store.SaveConfig(_config);
@@ -151,6 +154,7 @@ public sealed class MainForm : Form
         }
         _launchers = _store.LoadLaunchers();
         _clipboard = _store.LoadClipboard();
+        StartTodoReminderTimer();
 
         LoadMenuIcons();
         BuildShell();
@@ -164,6 +168,7 @@ public sealed class MainForm : Form
         }
 
         Shown += (_, _) => BeginInvoke(new Action(CheckForUpdatesOnStartup));
+        Shown += (_, _) => BeginInvoke(new Action(CheckTodoReminders));
     }
 
     protected override CreateParams CreateParams
@@ -196,6 +201,7 @@ public sealed class MainForm : Form
         }
 
         _closingApp = true;
+        DesktopWidgetStyle.OpacityChanged -= HandleDesktopWidgetOpacityChanged;
         FlushNote();
         if (_resizeFilter is not null)
         {
@@ -204,6 +210,8 @@ public sealed class MainForm : Form
         }
         _mainResizeTimer?.Dispose();
         _mainResizeTimer = null;
+        _todoReminderTimer?.Dispose();
+        _todoReminderTimer = null;
         if (_clipboardListenerRegistered)
         {
             _ = RemoveClipboardFormatListener(Handle);
@@ -801,7 +809,9 @@ public sealed class MainForm : Form
 
     private bool EnsureDesktopWidgetsTransparent()
     {
-        var changed = !_config.DesktopWidgetTransparent
+        var opacity = DesktopWidgetStyle.OpacityPercent;
+        var changed = _config.DesktopWidgetOpacity != opacity
+            || !_config.DesktopWidgetTransparent
             || !_config.DesktopTodoWidgetTransparent
             || !_config.DesktopProjectWidgetTransparent
             || !_config.DesktopLauncherWidgetTransparent
@@ -816,7 +826,20 @@ public sealed class MainForm : Form
         _config.DesktopSystemMonitorWidgetTransparent = true;
         _config.DesktopSearchWidgetTransparent = true;
         _config.DesktopClipboardWidgetTransparent = true;
+        _config.DesktopWidgetOpacity = opacity;
         return changed;
+    }
+
+    private void HandleDesktopWidgetOpacityChanged()
+    {
+        var opacity = DesktopWidgetStyle.OpacityPercent;
+        if (_config.DesktopWidgetOpacity == opacity)
+        {
+            return;
+        }
+
+        _config.DesktopWidgetOpacity = opacity;
+        _store.SaveConfig(_config);
     }
 
     private void RegisterMainWindowHotKey()
@@ -2433,7 +2456,7 @@ public sealed class MainForm : Form
         }, 1, 0);
         row.Controls.Add(new Label
         {
-            Text = item.CreatedAt.ToString("HH:mm"),
+            Text = item.ReminderAt.HasValue ? $"提醒 {item.ReminderAt.Value:HH:mm}" : item.CreatedAt.ToString("HH:mm"),
             Dock = DockStyle.Fill,
             ForeColor = TextColorSubtle,
             TextAlign = ContentAlignment.MiddleRight
@@ -2844,6 +2867,49 @@ public sealed class MainForm : Form
         RefreshDesktopTodoWidget();
     }
 
+    private void StartTodoReminderTimer()
+    {
+        _todoReminderTimer = new System.Windows.Forms.Timer { Interval = 30_000 };
+        _todoReminderTimer.Tick += (_, _) => CheckTodoReminders();
+        _todoReminderTimer.Start();
+    }
+
+    private void CheckTodoReminders()
+    {
+        var now = DateTime.Now;
+        var dueItems = _todos.Items
+            .Where(item => !item.Done
+                && item.ReminderAt.HasValue
+                && item.ReminderAt.Value <= now
+                && !item.ReminderNotifiedAt.HasValue)
+            .OrderBy(item => item.ReminderAt)
+            .ToArray();
+
+        if (dueItems.Length == 0)
+        {
+            return;
+        }
+
+        foreach (var item in dueItems)
+        {
+            item.ReminderNotifiedAt = now;
+        }
+
+        SaveTodos();
+        var lines = dueItems.Take(3).Select(item => item.Text.Trim()).Where(text => text.Length > 0).ToList();
+        if (dueItems.Length > lines.Count)
+        {
+            lines.Add($"还有 {dueItems.Length - lines.Count} 项");
+        }
+
+        _trayIcon.Visible = true;
+        _trayIcon.ShowBalloonTip(
+            10_000,
+            dueItems.Length == 1 ? "待办提醒" : $"待办提醒（{dueItems.Length} 项）",
+            string.Join(Environment.NewLine, lines),
+            ToolTipIcon.Info);
+    }
+
     private bool EnsureTodoTagPresets()
     {
         var changed = false;
@@ -2909,14 +2975,24 @@ public sealed class MainForm : Form
 
     private static string FormatTodoListDisplay(TodoItem item)
     {
-        return $"{item.Text}    {item.CreatedAt:MM-dd HH:mm}    [{GetTodoTagText(item)}]";
+        return $"{item.Text}    {item.CreatedAt:MM-dd HH:mm}{FormatTodoReminderSuffix(item)}    [{GetTodoTagText(item)}]";
+    }
+
+    private static string FormatTodoReminderSuffix(TodoItem item)
+    {
+        return item.ReminderAt.HasValue ? $"    提醒 {item.ReminderAt.Value:MM-dd HH:mm}" : "";
+    }
+
+    private static string FormatTodoReminderDetail(TodoItem item)
+    {
+        return item.ReminderAt.HasValue ? $"提醒时间：{item.ReminderAt.Value:yyyy-MM-dd HH:mm}" : "提醒时间：未设置";
     }
 
     private void ShowTodoDetails(TodoItem item)
     {
         var note = string.IsNullOrWhiteSpace(item.Note) ? "无" : item.Note.Trim();
         MessageBox.Show(this,
-            $"任务名称：{item.Text}\n标签：{GetTodoTagText(item)}\n创建时间：{item.CreatedAt:yyyy-MM-dd HH:mm}\n\n备注：\n{note}",
+            $"任务名称：{item.Text}\n标签：{GetTodoTagText(item)}\n创建时间：{item.CreatedAt:yyyy-MM-dd HH:mm}\n{FormatTodoReminderDetail(item)}\n\n备注：\n{note}",
             "任务详情",
             MessageBoxButtons.OK,
             MessageBoxIcon.Information);
@@ -2964,7 +3040,7 @@ public sealed class MainForm : Form
             FormBorderStyle = FormBorderStyle.None,
             MinimizeBox = false,
             MaximizeBox = false,
-            ClientSize = new Size(460, 380),
+            ClientSize = new Size(460, 450),
             BackColor = Color.FromArgb(17, 24, 39),
             Font = new Font("Microsoft YaHei UI", 9F),
             ForeColor = Color.FromArgb(241, 245, 249),
@@ -3085,11 +3161,27 @@ public sealed class MainForm : Form
             BackColor = GetTodoTagColor(tagBox.Text)
         };
 
-        var noteLabel = CreateLabel("备注（可选）", 152);
-        var noteBox = new TextBox
+        var reminderLabel = CreateLabel("提醒时间（可选）", 152);
+        var reminderPicker = new DateTimePicker
         {
             Left = 24,
             Top = 222,
+            Width = 410,
+            Height = 30,
+            Format = DateTimePickerFormat.Custom,
+            CustomFormat = "yyyy-MM-dd HH:mm",
+            ShowCheckBox = true,
+            Checked = source?.ReminderAt.HasValue == true,
+            Value = source?.ReminderAt ?? DateTime.Now.AddHours(1),
+            CalendarForeColor = Color.FromArgb(15, 23, 42),
+            CalendarMonthBackground = Color.FromArgb(248, 250, 252)
+        };
+
+        var noteLabel = CreateLabel("备注（可选）", 208);
+        var noteBox = new TextBox
+        {
+            Left = 24,
+            Top = 278,
             Width = 410,
             Height = 90,
             Multiline = true,
@@ -3112,7 +3204,7 @@ public sealed class MainForm : Form
         {
             Text = "确定",
             Left = 264,
-            Top = 330,
+            Top = 400,
             Width = 80,
             Height = 32,
             DialogResult = DialogResult.None,
@@ -3125,7 +3217,7 @@ public sealed class MainForm : Form
         {
             Text = "取消",
             Left = 354,
-            Top = 330,
+            Top = 400,
             Width = 80,
             Height = 32,
             DialogResult = DialogResult.Cancel,
@@ -3153,19 +3245,28 @@ public sealed class MainForm : Form
             }
 
             GetOrCreateTodoTagPreset(tag);
+            var reminderAt = reminderPicker.Checked ? reminderPicker.Value : (DateTime?)null;
+            var reminderNotifiedAt = source?.ReminderNotifiedAt;
+            if (source?.ReminderAt != reminderAt)
+            {
+                reminderNotifiedAt = null;
+            }
+
             result = new TodoItem
             {
                 Text = name,
                 Tag = tag,
                 Note = noteBox.Text.Trim(),
                 Done = source?.Done ?? false,
-                CreatedAt = source?.CreatedAt ?? DateTime.Now
+                CreatedAt = source?.CreatedAt ?? DateTime.Now,
+                ReminderAt = reminderAt,
+                ReminderNotifiedAt = reminderAt.HasValue ? reminderNotifiedAt : null
             };
             form.DialogResult = DialogResult.OK;
             form.Close();
         };
 
-        form.Controls.AddRange(new Control[] { chrome, separator, nameLabel, nameBox, tagLabel, tagBox, tagPreview, noteLabel, noteBox, okButton, cancelButton });
+        form.Controls.AddRange(new Control[] { chrome, separator, nameLabel, nameBox, tagLabel, tagBox, tagPreview, reminderLabel, reminderPicker, noteLabel, noteBox, okButton, cancelButton });
         form.AcceptButton = okButton;
         form.CancelButton = cancelButton;
         form.Shown += (_, _) =>
@@ -3647,6 +3748,8 @@ public sealed class MainForm : Form
             item.Note = edited.Note;
             item.Done = edited.Done;
             item.CreatedAt = edited.CreatedAt;
+            item.ReminderAt = edited.ReminderAt;
+            item.ReminderNotifiedAt = edited.ReminderNotifiedAt;
             SaveTodos();
             canvas.RefreshData(selectItem: item);
         };
@@ -7614,6 +7717,75 @@ internal static class NoteStyle
     }
 }
 
+internal static class DesktopWidgetStyle
+{
+    public const int MinOpacityPercent = 20;
+    public const int MaxOpacityPercent = 70;
+    public const int DefaultOpacityPercent = 35;
+
+    private static int _opacityPercent = DefaultOpacityPercent;
+
+    public static event Action? OpacityChanged;
+
+    public static int OpacityPercent
+    {
+        get => _opacityPercent;
+        set
+        {
+            var opacity = Math.Clamp(value, MinOpacityPercent, MaxOpacityPercent);
+            if (_opacityPercent == opacity)
+            {
+                return;
+            }
+
+            _opacityPercent = opacity;
+            OpacityChanged?.Invoke();
+        }
+    }
+
+    public static Color WindowTint => Color.FromArgb(Math.Min(95, CardAlpha), 20, 28, 40);
+    public static Color CardFill => Color.FromArgb(CardAlpha, 18, 26, 38);
+    public static Color ContentFill => Color.FromArgb(ContentAlpha, 24, 34, 48);
+    public static Color BorderColor => Color.FromArgb(CardAlpha, 150, 194, 238);
+    public static Color SearchBackColor => Color.FromArgb(AlphaFromPercent(Math.Min(MaxOpacityPercent, OpacityPercent + 4)), 192, 205);
+    public static Color SearchPanelFillColor => Color.FromArgb(AlphaFromPercent(Math.Min(MaxOpacityPercent, OpacityPercent + 9)), 202, 214);
+    public static Color SearchSelectedColor => Color.FromArgb(AlphaFromPercent(Math.Min(MaxOpacityPercent, OpacityPercent + 15)), 216, 226);
+
+    public static Color Selected(Color color) => Color.FromArgb(CardAlpha, color);
+
+    public static ToolStripMenuItem CreateOpacityMenu()
+    {
+        var menu = new ToolStripMenuItem("\u900f\u660e\u5ea6");
+        foreach (var opacity in new[] { 20, 30, 35, 45, 55, 65, 70 })
+        {
+            var item = new ToolStripMenuItem($"{opacity}%") { Tag = opacity };
+            item.Click += (_, _) => OpacityPercent = opacity;
+            menu.DropDownItems.Add(item);
+        }
+
+        menu.DropDownOpening += (_, _) =>
+        {
+            foreach (ToolStripItem item in menu.DropDownItems)
+            {
+                if (item is ToolStripMenuItem menuItem && menuItem.Tag is int opacity)
+                {
+                    menuItem.Checked = opacity == OpacityPercent;
+                }
+            }
+        };
+
+        return menu;
+    }
+
+    private static int CardAlpha => AlphaFromPercent(OpacityPercent);
+    private static int ContentAlpha => AlphaFromPercent(Math.Max(MinOpacityPercent, OpacityPercent - 5));
+
+    private static int AlphaFromPercent(int percent)
+    {
+        return Math.Clamp((int)Math.Round(255 * Math.Clamp(percent, 0, 100) / 100D), 0, 255);
+    }
+}
+
 internal sealed class DesktopTodoWidgetForm : Form
 {
     private const int WsExToolWindow = 0x00000080;
@@ -7664,6 +7836,8 @@ internal sealed class DesktopTodoWidgetForm : Form
         _view.LockPositionChanged += SetPositionLocked;
         _view.CloseRequested += Close;
         Controls.Add(_view);
+        DesktopWidgetStyle.OpacityChanged += ApplyWidgetSkin;
+        FormClosed += (_, _) => DesktopWidgetStyle.OpacityChanged -= ApplyWidgetSkin;
     }
 
     protected override CreateParams CreateParams
@@ -7762,7 +7936,7 @@ internal sealed class DesktopTodoWidgetForm : Form
         _view.BackColor = BackColor;
         if (IsHandleCreated)
         {
-            NativeGlass.EnableAcrylic(Handle, _transparent ? Color.FromArgb(95, 20, 28, 40) : Color.FromArgb(232, 18, 26, 38));
+            NativeGlass.EnableAcrylic(Handle, _transparent ? DesktopWidgetStyle.WindowTint : Color.FromArgb(232, 18, 26, 38));
         }
 
         _view.Invalidate();
@@ -7908,6 +8082,8 @@ internal sealed class DesktopLauncherWidgetForm : Form
         _view.LockPositionChanged += SetPositionLocked;
         _view.ChromeVisibilityChanged += AdjustChromeHeight;
         Controls.Add(_view);
+        DesktopWidgetStyle.OpacityChanged += ApplyWidgetSkin;
+        FormClosed += (_, _) => DesktopWidgetStyle.OpacityChanged -= ApplyWidgetSkin;
     }
 
     public event Action? ManageRequested;
@@ -8033,7 +8209,7 @@ internal sealed class DesktopLauncherWidgetForm : Form
         _view.BackColor = BackColor;
         if (IsHandleCreated)
         {
-            NativeGlass.EnableAcrylic(Handle, _transparent ? Color.FromArgb(95, 20, 28, 40) : Color.FromArgb(232, 18, 26, 38));
+            NativeGlass.EnableAcrylic(Handle, _transparent ? DesktopWidgetStyle.WindowTint : Color.FromArgb(232, 18, 26, 38));
         }
 
         _view.Invalidate();
@@ -8308,8 +8484,8 @@ internal sealed class DesktopLauncherWidgetView : Control
 
     private static readonly Color CardFill = Color.FromArgb(222, 24, 34, 48);
     private static readonly Color CardBorder = Color.FromArgb(98, 126, 154, 184);
-    private Color CurrentCardFill => _transparent ? Color.FromArgb(120, 20, 28, 40) : CardFill;
-    private Color CurrentCardBorder => _transparent ? Color.FromArgb(132, 150, 194, 238) : CardBorder;
+    private Color CurrentCardFill => _transparent ? DesktopWidgetStyle.CardFill : CardFill;
+    private Color CurrentCardBorder => _transparent ? DesktopWidgetStyle.BorderColor : CardBorder;
     private static readonly Color TextMain = Color.FromArgb(252, 255, 255);
     private static readonly Color TextMuted = Color.FromArgb(218, 232, 248);
     private static readonly Font TitleFont = new("Microsoft YaHei UI", 12F, FontStyle.Regular);
@@ -8399,6 +8575,7 @@ internal sealed class DesktopLauncherWidgetView : Control
         SetMenuIcon(_transparentMenuItem, "zicaidan", "4-1.png");
         SetMenuIcon(_showNamesMenuItem, "zicaidan", "4-2.png");
         appearanceMenu.DropDownItems.Add(_transparentMenuItem);
+        appearanceMenu.DropDownItems.Add(DesktopWidgetStyle.CreateOpacityMenu());
         appearanceMenu.DropDownItems.Add(_showNamesMenuItem);
         appearanceMenu.DropDownItems.Add(iconSizeMenu);
         _menu.Items.Add(appearanceMenu);
@@ -8671,7 +8848,7 @@ internal sealed class DesktopLauncherWidgetView : Control
     {
         var g = e.Graphics;
         g.SmoothingMode = SmoothingMode.AntiAlias;
-        g.TextRenderingHint = System.Drawing.Text.TextRenderingHint.AntiAliasGridFit;
+        g.TextRenderingHint = System.Drawing.Text.TextRenderingHint.ClearTypeGridFit;
         _launcherAreas.Clear();
 
         var card = new Rectangle(0, 0, Width, Height);
@@ -8992,6 +9169,8 @@ internal sealed class DesktopSystemMonitorWidgetForm : Form
         _view.ManageRequested += () => ManageRequested?.Invoke();
         _view.LockPositionChanged += SetPositionLocked;
         Controls.Add(_view);
+        DesktopWidgetStyle.OpacityChanged += ApplyWidgetSkin;
+        FormClosed += (_, _) => DesktopWidgetStyle.OpacityChanged -= ApplyWidgetSkin;
     }
 
     public event Action? ManageRequested;
@@ -9093,7 +9272,7 @@ internal sealed class DesktopSystemMonitorWidgetForm : Form
         _view.BackColor = BackColor;
         if (IsHandleCreated)
         {
-            NativeGlass.EnableAcrylic(Handle, _transparent ? Color.FromArgb(95, 20, 28, 40) : Color.FromArgb(232, 18, 26, 38));
+            NativeGlass.EnableAcrylic(Handle, _transparent ? DesktopWidgetStyle.WindowTint : Color.FromArgb(232, 18, 26, 38));
         }
 
         _view.Invalidate();
@@ -9250,7 +9429,7 @@ internal sealed class DesktopSystemMonitorWidgetView : Control
 
     private static readonly Color CardFill = Color.FromArgb(222, 24, 34, 48);
     private static readonly Color CardBorder = Color.FromArgb(98, 126, 154, 184);
-    private static readonly Color PanelFill = Color.FromArgb(118, 12, 18, 30);
+    private static Color PanelFill => DesktopWidgetStyle.ContentFill;
     private static readonly Color TextMain = Color.FromArgb(252, 255, 255);
     private static readonly Color TextMuted = Color.FromArgb(218, 232, 248);
     private static readonly Color Blue = Color.FromArgb(82, 168, 255);
@@ -9315,6 +9494,7 @@ internal sealed class DesktopSystemMonitorWidgetView : Control
         SetMenuIcon(appearanceMenu, "zicaidan", "4.png");
         SetMenuIcon(_transparentMenuItem, "zicaidan", "4-1.png");
         appearanceMenu.DropDownItems.Add(_transparentMenuItem);
+        appearanceMenu.DropDownItems.Add(DesktopWidgetStyle.CreateOpacityMenu());
         _menu.Items.Add(appearanceMenu);
         _menu.Items.Add(new ToolStripSeparator());
         var settingsMenuItem = _menu.Items.Add("设置中心", null, (_, _) => ManageRequested?.Invoke());
@@ -9460,15 +9640,15 @@ internal sealed class DesktopSystemMonitorWidgetView : Control
     {
         var g = e.Graphics;
         g.SmoothingMode = SmoothingMode.AntiAlias;
-        g.TextRenderingHint = System.Drawing.Text.TextRenderingHint.AntiAliasGridFit;
+        g.TextRenderingHint = System.Drawing.Text.TextRenderingHint.ClearTypeGridFit;
         var card = new Rectangle(0, 0, Width - 1, Height - 1);
         if (card.Width < 220 || card.Height < 140)
         {
             return;
         }
 
-        FillRound(g, card, _transparent ? Color.FromArgb(120, 20, 28, 40) : CardFill, 10);
-        DrawRound(g, card, _transparent ? Color.FromArgb(132, 150, 194, 238) : CardBorder, 10);
+        FillRound(g, card, _transparent ? DesktopWidgetStyle.CardFill : CardFill, 10);
+        DrawRound(g, card, _transparent ? DesktopWidgetStyle.BorderColor : CardBorder, 10);
         DrawHeader(g, card);
         DrawMetrics(g, new Rectangle(card.X + 14, card.Y + 58, card.Width - 28, card.Height - 70));
         DrawResizeGrip(g, card);
@@ -10025,6 +10205,8 @@ internal sealed class DesktopProjectWidgetForm : Form
         _view.SplitRequested += project => SplitRequested?.Invoke(project);
         _view.LockPositionChanged += SetPositionLocked;
         Controls.Add(_view);
+        DesktopWidgetStyle.OpacityChanged += ApplyWidgetSkin;
+        FormClosed += (_, _) => DesktopWidgetStyle.OpacityChanged -= ApplyWidgetSkin;
     }
 
     public event Action? ManageRequested;
@@ -10126,7 +10308,7 @@ internal sealed class DesktopProjectWidgetForm : Form
         _view.BackColor = BackColor;
         if (IsHandleCreated)
         {
-            NativeGlass.EnableAcrylic(Handle, _transparent ? Color.FromArgb(95, 20, 28, 40) : Color.FromArgb(232, 18, 26, 38));
+            NativeGlass.EnableAcrylic(Handle, _transparent ? DesktopWidgetStyle.WindowTint : Color.FromArgb(232, 18, 26, 38));
         }
 
         _view.Invalidate();
@@ -10229,10 +10411,10 @@ internal sealed class DesktopProjectWidgetView : Control
     private static readonly Color CardFill = Color.FromArgb(222, 24, 34, 48);
     private static readonly Color CardBorder = Color.FromArgb(98, 126, 154, 184);
     private static readonly Color PanelFill = Color.FromArgb(48, 58, 76);
-    private Color CurrentPanelFill => _transparent ? Color.FromArgb(118, 12, 18, 30) : PanelFill;
+    private Color CurrentPanelFill => _transparent ? DesktopWidgetStyle.ContentFill : PanelFill;
     private Color CurrentTabFill(bool selected) => selected
-        ? (_transparent ? Color.FromArgb(132, Blue.R, Blue.G, Blue.B) : Blue)
-        : (_transparent ? Color.FromArgb(90, 52, 64, 84) : Color.FromArgb(52, 64, 84));
+        ? (_transparent ? DesktopWidgetStyle.Selected(Blue) : Blue)
+        : (_transparent ? DesktopWidgetStyle.ContentFill : Color.FromArgb(52, 64, 84));
     private static readonly Color TextMain = Color.FromArgb(252, 255, 255);
     private static readonly Color TextMuted = Color.FromArgb(218, 232, 248);
     private static readonly Color Blue = Color.FromArgb(46, 126, 246);
@@ -10297,6 +10479,7 @@ internal sealed class DesktopProjectWidgetView : Control
         SetMenuIcon(appearanceMenu, "zicaidan", "4.png");
         SetMenuIcon(_transparentMenuItem, "zicaidan", "4-1.png");
         appearanceMenu.DropDownItems.Add(_transparentMenuItem);
+        appearanceMenu.DropDownItems.Add(DesktopWidgetStyle.CreateOpacityMenu());
         _menu.Items.Add(appearanceMenu);
         _menu.Items.Add(new ToolStripSeparator());
         var settingsMenuItem = _menu.Items.Add("设置中心", null, (_, _) => ManageRequested?.Invoke());
@@ -10580,14 +10763,14 @@ internal sealed class DesktopProjectWidgetView : Control
     {
         var g = e.Graphics;
         g.SmoothingMode = SmoothingMode.AntiAlias;
-        g.TextRenderingHint = System.Drawing.Text.TextRenderingHint.AntiAliasGridFit;
+        g.TextRenderingHint = System.Drawing.Text.TextRenderingHint.ClearTypeGridFit;
         _projectAreas.Clear();
         _phaseAreas.Clear();
         var projects = Projects();
 
         var card = new Rectangle(0, 0, Width, Height);
-        FillRound(g, card, _transparent ? Color.FromArgb(120, 20, 28, 40) : CardFill, 10);
-        DrawRound(g, new Rectangle(0, 0, Width - 1, Height - 1), CardBorder, 10);
+        FillRound(g, card, _transparent ? DesktopWidgetStyle.CardFill : CardFill, 10);
+        DrawRound(g, new Rectangle(0, 0, Width - 1, Height - 1), _transparent ? DesktopWidgetStyle.BorderColor : CardBorder, 10);
 
         var headerIcon = new Rectangle(18, 14, 20, 20);
         if (_projectIcon is not null)
@@ -10934,7 +11117,7 @@ internal sealed class DesktopTodoWidgetView : Control
     private static readonly Color CardFill = Color.FromArgb(222, 24, 34, 48);
     private static readonly Color CardBorder = Color.FromArgb(96, 104, 130, 156);
     private static readonly Color ContentFill = Color.FromArgb(190, 8, 14, 24);
-    private static readonly Color TransparentContentFill = Color.FromArgb(118, 12, 18, 30);
+    private static Color TransparentContentFill => DesktopWidgetStyle.ContentFill;
     private static readonly Color TextMain = Color.FromArgb(252, 255, 255);
     private static readonly Color TextSubtle = Color.FromArgb(218, 232, 248);
     private static readonly Font TitleFont = new("Microsoft YaHei UI", 13F, FontStyle.Regular);
@@ -10984,6 +11167,7 @@ internal sealed class DesktopTodoWidgetView : Control
         SetMenuIcon(appearanceMenu, "zicaidan", "4.png");
         SetMenuIcon(_transparentMenuItem, "zicaidan", "4-1.png");
         appearanceMenu.DropDownItems.Add(_transparentMenuItem);
+        appearanceMenu.DropDownItems.Add(DesktopWidgetStyle.CreateOpacityMenu());
         _menu.Items.Add(appearanceMenu);
         _menu.Items.Add(new ToolStripSeparator());
         var settingsMenuItem = _menu.Items.Add("设置中心", null, (_, _) => _manageRequested());
@@ -11173,7 +11357,7 @@ internal sealed class DesktopTodoWidgetView : Control
     {
         var g = e.Graphics;
         g.SmoothingMode = SmoothingMode.AntiAlias;
-        g.TextRenderingHint = System.Drawing.Text.TextRenderingHint.AntiAliasGridFit;
+        g.TextRenderingHint = System.Drawing.Text.TextRenderingHint.ClearTypeGridFit;
         _checkAreas.Clear();
         _rowAreas.Clear();
         _overdueDateAreas.Clear();
@@ -11184,8 +11368,8 @@ internal sealed class DesktopTodoWidgetView : Control
             return;
         }
 
-        FillRound(g, card, _transparent ? Color.FromArgb(120, 20, 28, 40) : CardFill, 10);
-        DrawRound(g, _transparent ? Color.FromArgb(132, 150, 194, 238) : CardBorder, card, 10);
+        FillRound(g, card, _transparent ? DesktopWidgetStyle.CardFill : CardFill, 10);
+        DrawRound(g, _transparent ? DesktopWidgetStyle.BorderColor : CardBorder, card, 10);
         DrawHeader(g, card);
         DrawTodos(g, card);
         DrawFooter(g, card);
@@ -11256,11 +11440,12 @@ internal sealed class DesktopTodoWidgetView : Control
             }
             var tagText = string.IsNullOrWhiteSpace(item.Tag) ? "未分类" : item.Tag.Trim();
             var badgeWidth = Math.Max(44, Math.Min(86, 18 + tagText.Length * 14));
-            var timeWidth = 44;
+            var timeText = item.ReminderAt.HasValue ? $"提醒 {item.ReminderAt.Value:HH:mm}" : item.CreatedAt.ToString("HH:mm");
+            var timeWidth = item.ReminderAt.HasValue ? 74 : 44;
             var textRight = row.Right - badgeWidth - timeWidth - 18;
             var textRect = new Rectangle(row.X + 26, row.Y + 4, Math.Max(40, textRight - row.X - 26), 22);
             DrawSingleLineText(g, item.Text, NormalFont, textRect, item.Done ? TextSubtle : TextMain);
-            DrawSingleLineText(g, item.CreatedAt.ToString("HH:mm"), SmallFont, new Rectangle(row.Right - badgeWidth - timeWidth - 8, row.Y + 4, timeWidth, 24), TextSubtle);
+            DrawSingleLineText(g, timeText, SmallFont, new Rectangle(row.Right - badgeWidth - timeWidth - 8, row.Y + 4, timeWidth, 24), TextSubtle);
             DrawBadge(g, tagText, new Rectangle(row.Right - badgeWidth, row.Y + 3, badgeWidth, 23), GetTagColor(item.Tag));
         }
     }
@@ -11378,7 +11563,8 @@ internal sealed class DesktopTodoWidgetView : Control
     private void ShowTodoDetails(TodoItem item)
     {
         var note = string.IsNullOrWhiteSpace(item.Note) ? "无" : item.Note.Trim();
-        MessageBox.Show(FindForm(), $"任务名称：{item.Text}\n标签：{(string.IsNullOrWhiteSpace(item.Tag) ? "未分类" : item.Tag.Trim())}\n创建时间：{item.CreatedAt:yyyy-MM-dd HH:mm}\n\n备注：\n{note}", "任务详情", MessageBoxButtons.OK, MessageBoxIcon.Information);
+        var reminder = item.ReminderAt.HasValue ? $"提醒时间：{item.ReminderAt.Value:yyyy-MM-dd HH:mm}" : "提醒时间：未设置";
+        MessageBox.Show(FindForm(), $"任务名称：{item.Text}\n标签：{(string.IsNullOrWhiteSpace(item.Tag) ? "未分类" : item.Tag.Trim())}\n创建时间：{item.CreatedAt:yyyy-MM-dd HH:mm}\n{reminder}\n\n备注：\n{note}", "任务详情", MessageBoxButtons.OK, MessageBoxIcon.Information);
     }
 
     private static string WeekText(DayOfWeek day)
@@ -11534,25 +11720,24 @@ internal sealed class DesktopTodoWidgetView : Control
 
     private static void DrawSingleLineText(Graphics g, string text, Font font, Rectangle rect, Color color)
     {
-        using var brush = new SolidBrush(Color.FromArgb(255, color.R, color.G, color.B));
-        using var format = new StringFormat(StringFormatFlags.NoWrap)
-        {
-            LineAlignment = StringAlignment.Center,
-            Trimming = StringTrimming.EllipsisCharacter
-        };
-        g.DrawString(text, font, brush, rect, format);
+        TextRenderer.DrawText(
+            g,
+            text,
+            font,
+            rect,
+            color,
+            TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis | TextFormatFlags.NoPadding | TextFormatFlags.PreserveGraphicsClipping);
     }
 
     private static void DrawCenteredText(Graphics g, string text, Font font, Color color, Rectangle rect)
     {
-        using var brush = new SolidBrush(Color.FromArgb(255, color.R, color.G, color.B));
-        using var format = new StringFormat(StringFormatFlags.NoWrap)
-        {
-            Alignment = StringAlignment.Center,
-            LineAlignment = StringAlignment.Center,
-            Trimming = StringTrimming.EllipsisCharacter
-        };
-        g.DrawString(text, font, brush, rect, format);
+        TextRenderer.DrawText(
+            g,
+            text,
+            font,
+            rect,
+            color,
+            TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis | TextFormatFlags.NoPadding | TextFormatFlags.PreserveGraphicsClipping);
     }
 }
 
@@ -11595,6 +11780,8 @@ internal sealed class DesktopNoteWidgetForm : Form
         _view.LockPositionChanged += SetPositionLocked;
         _view.CloseRequested += Close;
         Controls.Add(_view);
+        DesktopWidgetStyle.OpacityChanged += _view.Invalidate;
+        FormClosed += (_, _) => DesktopWidgetStyle.OpacityChanged -= _view.Invalidate;
         MinimumSize = new Size(140, 100);
         if (_note.ImageOnly && !_view.NaturalImageSize.IsEmpty)
         {
@@ -11890,6 +12077,7 @@ internal sealed class DesktopNoteWidgetView : Control
         componentMenu.DropDownItems.Add("移除组件", LoadNoteMenuImage("zicaidan", "3-2.png"), (_, _) => CloseRequested?.Invoke());
         _menu.Items.Add(componentMenu);
         var appearanceMenu = new ToolStripMenuItem("外观设置", LoadNoteMenuImage("zicaidan", "4.png"));
+        appearanceMenu.DropDownItems.Add(DesktopWidgetStyle.CreateOpacityMenu());
         _menu.Items.Add(appearanceMenu);
         _menu.Items.Add(new ToolStripSeparator());
         _menu.Items.Add("设置中心", LoadNoteMenuImage("Menu", "shezhizhognxin.png"), (_, _) => _manageRequested());
@@ -12064,7 +12252,7 @@ internal sealed class DesktopNoteWidgetView : Control
     {
         var g = e.Graphics;
         g.SmoothingMode = SmoothingMode.AntiAlias;
-        g.TextRenderingHint = System.Drawing.Text.TextRenderingHint.AntiAliasGridFit;
+        g.TextRenderingHint = System.Drawing.Text.TextRenderingHint.ClearTypeGridFit;
         var rect = new Rectangle(0, 0, ClientSize.Width - 1, ClientSize.Height - 1);
         var noteColor = Color.FromArgb(_note.ColorArgb);
         if (noteColor.A > 0)
@@ -12074,9 +12262,9 @@ internal sealed class DesktopNoteWidgetView : Control
         }
         else
         {
-            using var fill = new SolidBrush(Color.FromArgb(42, 20, 28, 40));
+            using var fill = new SolidBrush(DesktopWidgetStyle.CardFill);
             g.FillRectangle(fill, rect);
-            using var border = new Pen(Color.FromArgb(128, 150, 180, 220), 1.2F);
+            using var border = new Pen(DesktopWidgetStyle.BorderColor, 1.2F);
             g.DrawRectangle(border, rect);
         }
 
@@ -12101,7 +12289,7 @@ internal sealed class DesktopNoteWidgetView : Control
 
         if (!_note.ImageOnly)
         {
-            using var header = new SolidBrush(Color.FromArgb(112, 20, 28, 40));
+            using var header = new SolidBrush(DesktopWidgetStyle.ContentFill);
             g.FillRectangle(header, 0, 0, Width, 36);
             using var titleFont = new Font("Microsoft YaHei UI", 10F, FontStyle.Bold);
             DrawSingleLineText(g, _note.Title, titleFont, GetTitleRect(), NoteStyle.TextColor(_note));
@@ -13349,6 +13537,8 @@ internal sealed class DesktopOrganizerWidgetForm : Form
         _view.HideRequested += HideWidget;
         _view.CloseRequested += Close;
         Controls.Add(_view);
+        DesktopWidgetStyle.OpacityChanged += ApplyWidgetSkin;
+        FormClosed += (_, _) => DesktopWidgetStyle.OpacityChanged -= ApplyWidgetSkin;
     }
 
     private void BeginManualMove()
@@ -13458,7 +13648,7 @@ internal sealed class DesktopOrganizerWidgetForm : Form
         if (IsHandleCreated)
         {
             var tint = _config.DesktopWidgetTransparent
-                ? Color.FromArgb(95, 20, 28, 40)
+                ? DesktopWidgetStyle.WindowTint
                 : Color.FromArgb(232, 18, 26, 38);
             NativeGlass.EnableAcrylic(Handle, tint);
         }
@@ -13871,9 +14061,9 @@ internal sealed class DesktopOrganizerWidgetView : Control
     private static readonly Font SmallFont = new("Microsoft YaHei UI", 8F);
     private static readonly Font IconFont = new("Microsoft YaHei UI", 11F, FontStyle.Bold);
 
-    private Color CurrentCardFill => _config.DesktopWidgetTransparent ? Color.FromArgb(120, 20, 28, 40) : CardFill;
-    private Color CurrentCardBorder => _config.DesktopWidgetTransparent ? Color.FromArgb(132, 150, 194, 238) : CardBorder;
-    private Color CurrentPanelFill => _config.DesktopWidgetTransparent ? Color.FromArgb(118, 12, 18, 30) : PanelFill;
+    private Color CurrentCardFill => _config.DesktopWidgetTransparent ? DesktopWidgetStyle.CardFill : CardFill;
+    private Color CurrentCardBorder => _config.DesktopWidgetTransparent ? DesktopWidgetStyle.BorderColor : CardBorder;
+    private Color CurrentPanelFill => _config.DesktopWidgetTransparent ? DesktopWidgetStyle.ContentFill : PanelFill;
     private int CurrentIconSize => Math.Clamp(_config.DesktopOrganizerIconSize <= 0 ? 48 : _config.DesktopOrganizerIconSize, MinOrganizerIconSize, MaxOrganizerIconSize);
     private int CurrentTileHeight => Math.Max(BasePreviewTileHeight, CurrentIconSize + (_config.DesktopOrganizerShowNames ? 58 : 30));
 
@@ -13981,6 +14171,7 @@ internal sealed class DesktopOrganizerWidgetView : Control
         SetMenuIcon(_transparentMenuItem, "zicaidan", "4-1.png");
         SetMenuIcon(_showNamesMenuItem, "zicaidan", "4-2.png");
         appearanceMenu.DropDownItems.Add(_transparentMenuItem);
+        appearanceMenu.DropDownItems.Add(DesktopWidgetStyle.CreateOpacityMenu());
         appearanceMenu.DropDownItems.Add(_showNamesMenuItem);
         appearanceMenu.DropDownItems.Add(iconSizeMenu);
         _settingsMenu.Items.Add(appearanceMenu);
@@ -14837,7 +15028,7 @@ internal sealed class DesktopOrganizerWidgetView : Control
     {
         var g = e.Graphics;
         g.SmoothingMode = SmoothingMode.AntiAlias;
-        g.TextRenderingHint = System.Drawing.Text.TextRenderingHint.AntiAliasGridFit;
+        g.TextRenderingHint = System.Drawing.Text.TextRenderingHint.ClearTypeGridFit;
         _hotspots.Clear();
         _previewAreas.Clear();
         _categoryTabAreas.Clear();
@@ -16193,6 +16384,8 @@ internal sealed class DesktopClipboardWidgetForm : Form
         _view.CloseRequested += Close;
         _view.ManageRequested += () => manageRequested();
         Controls.Add(_view);
+        DesktopWidgetStyle.OpacityChanged += ApplyWidgetSkin;
+        FormClosed += (_, _) => DesktopWidgetStyle.OpacityChanged -= ApplyWidgetSkin;
     }
 
     public void ShowAsDesktopWidget(WidgetPlacement? placement = null)
@@ -16359,7 +16552,7 @@ internal sealed class DesktopClipboardWidgetForm : Form
         _view.BackColor = BackColor;
         if (IsHandleCreated)
         {
-            NativeGlass.EnableAcrylic(Handle, _transparent ? Color.FromArgb(95, 20, 28, 40) : Color.FromArgb(232, 18, 26, 38));
+            NativeGlass.EnableAcrylic(Handle, _transparent ? DesktopWidgetStyle.WindowTint : Color.FromArgb(232, 18, 26, 38));
         }
 
         _view.Invalidate();
@@ -16594,6 +16787,7 @@ internal sealed class DesktopClipboardWidgetView : Control
         };
         SetMenuIcon(_transparentMenuItem, "zicaidan", "4-1.png");
         appearanceMenu.DropDownItems.Add(_transparentMenuItem);
+        appearanceMenu.DropDownItems.Add(DesktopWidgetStyle.CreateOpacityMenu());
         _menu.Items.Add(appearanceMenu);
         _menu.Items.Add(new ToolStripSeparator());
         var settingsMenuItem = _menu.Items.Add("剪贴板管理", null, (_, _) => ManageRequested?.Invoke());
@@ -16853,7 +17047,7 @@ internal sealed class DesktopClipboardWidgetView : Control
     {
         var g = e.Graphics;
         g.SmoothingMode = SmoothingMode.AntiAlias;
-        g.TextRenderingHint = System.Drawing.Text.TextRenderingHint.AntiAliasGridFit;
+        g.TextRenderingHint = System.Drawing.Text.TextRenderingHint.ClearTypeGridFit;
         _itemAreas.Clear();
         var card = new Rectangle(0, 0, Width - 1, Height - 1);
         if (card.Width < 220 || card.Height < 150)
@@ -16861,11 +17055,11 @@ internal sealed class DesktopClipboardWidgetView : Control
             return;
         }
 
-        using (var fill = new SolidBrush(_transparent ? Color.FromArgb(120, 20, 28, 40) : CardFill))
+        using (var fill = new SolidBrush(_transparent ? DesktopWidgetStyle.CardFill : CardFill))
         using (var path = RoundPath(card, 10))
         {
             g.FillPath(fill, path);
-            using var border = new Pen(_transparent ? Color.FromArgb(132, 150, 194, 238) : CardBorder, 1);
+            using var border = new Pen(_transparent ? DesktopWidgetStyle.BorderColor : CardBorder, 1);
             g.DrawPath(border, path);
         }
 
@@ -16932,7 +17126,9 @@ internal sealed class DesktopClipboardWidgetView : Control
             var item = _clipboard.Items[_scrollOffset + i];
             var row = new Rectangle(area.X, area.Y + i * rowHeight, area.Width, rowHeight - 8);
             var selected = ReferenceEquals(item, _selectedItem);
-            using (var fill = new SolidBrush(selected ? Color.FromArgb(90, 46, 126, 246) : Color.FromArgb(86, 35, 45, 60)))
+            using (var fill = new SolidBrush(selected
+                ? (_transparent ? DesktopWidgetStyle.Selected(Color.FromArgb(46, 126, 246)) : Color.FromArgb(90, 46, 126, 246))
+                : (_transparent ? DesktopWidgetStyle.ContentFill : Color.FromArgb(86, 35, 45, 60))))
             using (var path = RoundPath(row, 7))
             {
                 g.FillPath(fill, path);
@@ -17736,14 +17932,14 @@ internal sealed class DesktopSearchWidgetForm : Form
     private Rectangle _capsuleRect;
     private Rectangle _clearRect;
     private bool TransparentStyle => _transparentProvider();
-    private Color SearchBackColor => TransparentStyle ? Color.FromArgb(180, 192, 205) : Color.FromArgb(245, 250, 255);
-    private Color SearchFillColor => TransparentStyle ? Color.FromArgb(180, 192, 205) : Color.FromArgb(245, 250, 255);
-    private Color SearchPanelFillColor => TransparentStyle ? Color.FromArgb(190, 202, 214) : SearchFillColor;
+    private Color SearchBackColor => TransparentStyle ? DesktopWidgetStyle.SearchBackColor : Color.FromArgb(245, 250, 255);
+    private Color SearchFillColor => TransparentStyle ? DesktopWidgetStyle.SearchBackColor : Color.FromArgb(245, 250, 255);
+    private Color SearchPanelFillColor => TransparentStyle ? DesktopWidgetStyle.SearchPanelFillColor : SearchFillColor;
     private Color SearchTextColor => Color.FromArgb(18, 25, 38);
     private Color SearchSubtleColor => TransparentStyle ? Color.FromArgb(72, 86, 104) : Color.FromArgb(68, 84, 104);
-    private Color SearchSelectedColor => TransparentStyle ? Color.FromArgb(205, 216, 226) : Color.FromArgb(225, 235, 247, 255);
-    private Color SearchBorderColor => TransparentStyle ? Color.FromArgb(132, 150, 194, 238) : Color.FromArgb(170, 202, 232);
-    private Color SearchFocusedBorderColor => TransparentStyle ? Color.FromArgb(132, 150, 194, 238) : Color.FromArgb(112, 170, 255);
+    private Color SearchSelectedColor => TransparentStyle ? DesktopWidgetStyle.SearchSelectedColor : Color.FromArgb(225, 235, 247, 255);
+    private Color SearchBorderColor => TransparentStyle ? DesktopWidgetStyle.BorderColor : Color.FromArgb(170, 202, 232);
+    private Color SearchFocusedBorderColor => TransparentStyle ? DesktopWidgetStyle.BorderColor : Color.FromArgb(112, 170, 255);
     private Color SearchIconBackColor => TransparentStyle ? Color.FromArgb(130, 180, 255) : Color.FromArgb(94, 116, 142);
     private Color SearchChipBackColor => TransparentStyle ? Color.FromArgb(44, 10, 22, 36) : Color.FromArgb(218, 230, 242);
 
@@ -17814,11 +18010,14 @@ internal sealed class DesktopSearchWidgetForm : Form
         _menu.Items.Add(componentMenu);
         var appearanceMenu = new ToolStripMenuItem("外观设置");
         SetMenuIcon(appearanceMenu, "zicaidan", "4.png");
+        appearanceMenu.DropDownItems.Add(DesktopWidgetStyle.CreateOpacityMenu());
         _menu.Items.Add(appearanceMenu);
         _menu.Items.Add(new ToolStripSeparator());
         var settingsMenuItem = _menu.Items.Add("设置中心", null, (_, _) => _manageRequested());
         SetMenuIcon(settingsMenuItem, "Menu", "shezhizhognxin.png");
         ContextMenuStrip = _menu;
+        DesktopWidgetStyle.OpacityChanged += RefreshSearch;
+        FormClosed += (_, _) => DesktopWidgetStyle.OpacityChanged -= RefreshSearch;
 
         _resultMenu.Items.Add("打开路径", null, (_, _) => OpenSelectedResultLocation());
         _resultMenu.Opening += (_, e) =>
@@ -18470,6 +18669,7 @@ internal sealed class DesktopSearchWidgetForm : Form
         }
 
         e.Graphics.SmoothingMode = SmoothingMode.AntiAlias;
+        e.Graphics.TextRenderingHint = System.Drawing.Text.TextRenderingHint.ClearTypeGridFit;
         var selected = (e.State & DrawItemState.Selected) == DrawItemState.Selected;
         using (var fill = new SolidBrush(selected ? SearchSelectedColor : _results.BackColor))
         {
@@ -21172,7 +21372,8 @@ internal sealed class TodoPageCanvas : Control
         var check = new Rectangle(row.X + 8, row.Y + 8, 18, 18);
         DrawCheckBox(g, check, item.Done);
         var tag = string.IsNullOrWhiteSpace(item.Tag) ? "未分类" : item.Tag.Trim();
-        var text = $"{item.Text}    {item.CreatedAt:MM-dd HH:mm}    [{tag}]";
+        var reminder = item.ReminderAt.HasValue ? $"    提醒 {item.ReminderAt.Value:MM-dd HH:mm}" : "";
+        var text = $"{item.Text}    {item.CreatedAt:MM-dd HH:mm}{reminder}    [{tag}]";
         var textColor = item.Done ? TextSubtle : TextMain;
         TextRenderer.DrawText(g, text, NormalFont, new Rectangle(row.X + 36, row.Y, row.Width - 44, row.Height), textColor, TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis);
         _itemAreas.Add((row, check, item));
@@ -22556,24 +22757,26 @@ internal sealed class DashboardCanvas : Control
         {
             for (var i = 0; i < items.Length; i++)
             {
+                var item = items[i];
                 var y = inner.Y + i * 38;
                 var box = new Rectangle(inner.X, y + 8, 16, 16);
-                _todoCheckAreas.Add((new Rectangle(inner.X - 4, y, 26, 30), items[i]));
+                _todoCheckAreas.Add((new Rectangle(inner.X - 4, y, 26, 30), item));
                 DrawRound(g, box, TextSubtle, 3);
-                if (items[i].Done)
+                if (item.Done)
                 {
                     using var checkPen = new Pen(Color.FromArgb(126, 242, 210), 1.8F);
                     g.DrawLine(checkPen, box.X + 3, box.Y + 9, box.X + 7, box.Y + 13);
                     g.DrawLine(checkPen, box.X + 7, box.Y + 13, box.Right - 3, box.Y + 4);
                 }
 
-                DrawText(g, items[i].Text, NormalFont, items[i].Done ? TextSubtle : TextMain, inner.X + 28, y + 5);
-                DrawText(g, items[i].CreatedAt.ToString("HH:mm"), SmallFont, TextSubtle, inner.Right - 112, y + 8);
-                var tagText = string.IsNullOrWhiteSpace(items[i].Tag) ? "未分类" : items[i].Tag.Trim();
+                DrawText(g, item.Text, NormalFont, item.Done ? TextSubtle : TextMain, inner.X + 28, y + 5);
+                var timeText = item.ReminderAt.HasValue ? $"提醒 {item.ReminderAt.Value:HH:mm}" : item.CreatedAt.ToString("HH:mm");
+                DrawText(g, timeText, SmallFont, TextSubtle, inner.Right - 112, y + 8);
+                var tagText = string.IsNullOrWhiteSpace(item.Tag) ? "未分类" : item.Tag.Trim();
                 var badgeWidth = Math.Max(44, Math.Min(84, 18 + tagText.Length * 14));
                 var todoRect = new Rectangle(inner.X, y, inner.Width, 30);
-                _todoAreas.Add((todoRect, items[i]));
-                DrawBadge(g, tagText, new Rectangle(inner.Right - badgeWidth, y + 4, badgeWidth, 24), GetDashboardTodoTagColor(items[i].Tag));
+                _todoAreas.Add((todoRect, item));
+                DrawBadge(g, tagText, new Rectangle(inner.Right - badgeWidth, y + 4, badgeWidth, 24), GetDashboardTodoTagColor(item.Tag));
             }
         }
 
@@ -22615,7 +22818,8 @@ internal sealed class DashboardCanvas : Control
         _todoMenu.Items.Add("查看详情", null, (_, _) =>
         {
             var note = string.IsNullOrWhiteSpace(item.Note) ? "无" : item.Note.Trim();
-            MessageBox.Show(FindForm(), $"任务名称：{item.Text}\n标签：{(string.IsNullOrWhiteSpace(item.Tag) ? "未分类" : item.Tag.Trim())}\n创建时间：{item.CreatedAt:yyyy-MM-dd HH:mm}\n\n备注：\n{note}", "任务详情", MessageBoxButtons.OK, MessageBoxIcon.Information);
+            var reminder = item.ReminderAt.HasValue ? $"提醒时间：{item.ReminderAt.Value:yyyy-MM-dd HH:mm}" : "提醒时间：未设置";
+            MessageBox.Show(FindForm(), $"任务名称：{item.Text}\n标签：{(string.IsNullOrWhiteSpace(item.Tag) ? "未分类" : item.Tag.Trim())}\n创建时间：{item.CreatedAt:yyyy-MM-dd HH:mm}\n{reminder}\n\n备注：\n{note}", "任务详情", MessageBoxButtons.OK, MessageBoxIcon.Information);
         });
         _todoMenu.Show(this, location);
     }
@@ -23726,11 +23930,3 @@ internal static class GraphicsExtensions
         return path;
     }
 }
-
-
-
-
-
-
-
-

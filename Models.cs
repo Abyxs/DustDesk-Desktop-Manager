@@ -5,6 +5,7 @@ namespace DustDesk;
 public sealed class AppConfig
 {
     public bool DesktopWidgetTransparent { get; set; } = true;
+    public int DesktopWidgetOpacity { get; set; } = 35;
     public bool DesktopOrganizerShowNames { get; set; }
     public int DesktopOrganizerIconSize { get; set; } = 48;
     public bool DesktopTodoWidgetTransparent { get; set; } = true;
@@ -131,6 +132,8 @@ public sealed class TodoItem
     public string Note { get; set; } = "";
     public bool Done { get; set; }
     public DateTime CreatedAt { get; set; } = DateTime.Now;
+    public DateTime? ReminderAt { get; set; }
+    public DateTime? ReminderNotifiedAt { get; set; }
 
     public override string ToString() => Text;
 }

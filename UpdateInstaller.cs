@@ -22,7 +22,7 @@ internal static class UpdateInstaller
         }
 
         progress?.Report(new UpdateInstallProgress("正在准备更新..."));
-        targetDirectory = Path.GetFullPath(targetDirectory);
+        targetDirectory = NormalizeDirectoryForCommand(targetDirectory);
         executablePath = Path.GetFullPath(executablePath);
 
         var updateRoot = Path.Combine(Path.GetTempPath(), "DustDesk", "Updates", $"{update.VersionText}-{DateTime.Now:yyyyMMddHHmmss}-{Guid.NewGuid():N}");
@@ -132,8 +132,25 @@ internal static class UpdateInstaller
             : $"{bytes / 1024d:0.0} KB";
     }
 
+    private static string NormalizeDirectoryForCommand(string directory)
+    {
+        var fullPath = Path.GetFullPath(directory);
+        var root = Path.GetPathRoot(fullPath) ?? string.Empty;
+        while (fullPath.Length > root.Length
+            && (fullPath.EndsWith(Path.DirectorySeparatorChar) || fullPath.EndsWith(Path.AltDirectorySeparatorChar)))
+        {
+            fullPath = fullPath[..^1];
+        }
+
+        return fullPath;
+    }
+
     private static string WriteInstallScript(string updateRoot, string sourceDirectory, string targetDirectory, string executablePath, int processId)
     {
+        sourceDirectory = NormalizeDirectoryForCommand(sourceDirectory);
+        targetDirectory = NormalizeDirectoryForCommand(targetDirectory);
+        executablePath = Path.GetFullPath(executablePath);
+
         var scriptPath = Path.Combine(updateRoot, "install-update.cmd");
         var logPath = Path.Combine(updateRoot, "install.log");
         var script = $"""
