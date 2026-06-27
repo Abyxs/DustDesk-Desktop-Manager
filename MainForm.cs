@@ -7750,7 +7750,7 @@ internal sealed class DesktopTodoWidgetForm : Form
         _view.BackColor = BackColor;
         if (IsHandleCreated)
         {
-            NativeGlass.EnableAcrylic(Handle, _transparent ? Color.FromArgb(34, 74, 138, 210) : Color.FromArgb(232, 18, 26, 38));
+            NativeGlass.EnableAcrylic(Handle, _transparent ? Color.FromArgb(95, 20, 28, 40) : Color.FromArgb(232, 18, 26, 38));
         }
 
         _view.Invalidate();
@@ -8021,7 +8021,7 @@ internal sealed class DesktopLauncherWidgetForm : Form
         _view.BackColor = BackColor;
         if (IsHandleCreated)
         {
-            NativeGlass.EnableAcrylic(Handle, _transparent ? Color.FromArgb(34, 74, 138, 210) : Color.FromArgb(232, 18, 26, 38));
+            NativeGlass.EnableAcrylic(Handle, _transparent ? Color.FromArgb(95, 20, 28, 40) : Color.FromArgb(232, 18, 26, 38));
         }
 
         _view.Invalidate();
@@ -8296,10 +8296,10 @@ internal sealed class DesktopLauncherWidgetView : Control
 
     private static readonly Color CardFill = Color.FromArgb(222, 24, 34, 48);
     private static readonly Color CardBorder = Color.FromArgb(98, 126, 154, 184);
-    private Color CurrentCardFill => _transparent ? Color.FromArgb(70, 24, 34, 48) : CardFill;
+    private Color CurrentCardFill => _transparent ? Color.FromArgb(120, 20, 28, 40) : CardFill;
     private Color CurrentCardBorder => _transparent ? Color.FromArgb(132, 150, 194, 238) : CardBorder;
-    private static readonly Color TextMain = Color.FromArgb(242, 246, 252);
-    private static readonly Color TextMuted = Color.FromArgb(170, 188, 210);
+    private static readonly Color TextMain = Color.FromArgb(252, 255, 255);
+    private static readonly Color TextMuted = Color.FromArgb(218, 232, 248);
     private static readonly Font TitleFont = new("Microsoft YaHei UI", 12F, FontStyle.Regular);
     private static readonly Font SmallFont = new("Microsoft YaHei UI", 8.5F);
     private int CurrentIconSize => Math.Clamp(_iconSize <= 0 ? 48 : _iconSize, MinLauncherIconSize, MaxLauncherIconSize);
@@ -8659,6 +8659,7 @@ internal sealed class DesktopLauncherWidgetView : Control
     {
         var g = e.Graphics;
         g.SmoothingMode = SmoothingMode.AntiAlias;
+        g.TextRenderingHint = System.Drawing.Text.TextRenderingHint.AntiAliasGridFit;
         _launcherAreas.Clear();
 
         var card = new Rectangle(0, 0, Width, Height);
@@ -9080,7 +9081,7 @@ internal sealed class DesktopSystemMonitorWidgetForm : Form
         _view.BackColor = BackColor;
         if (IsHandleCreated)
         {
-            NativeGlass.EnableAcrylic(Handle, _transparent ? Color.FromArgb(34, 74, 138, 210) : Color.FromArgb(232, 18, 26, 38));
+            NativeGlass.EnableAcrylic(Handle, _transparent ? Color.FromArgb(95, 20, 28, 40) : Color.FromArgb(232, 18, 26, 38));
         }
 
         _view.Invalidate();
@@ -9237,9 +9238,9 @@ internal sealed class DesktopSystemMonitorWidgetView : Control
 
     private static readonly Color CardFill = Color.FromArgb(222, 24, 34, 48);
     private static readonly Color CardBorder = Color.FromArgb(98, 126, 154, 184);
-    private static readonly Color PanelFill = Color.FromArgb(58, 48, 58, 76);
-    private static readonly Color TextMain = Color.FromArgb(242, 246, 252);
-    private static readonly Color TextMuted = Color.FromArgb(170, 188, 210);
+    private static readonly Color PanelFill = Color.FromArgb(118, 12, 18, 30);
+    private static readonly Color TextMain = Color.FromArgb(252, 255, 255);
+    private static readonly Color TextMuted = Color.FromArgb(218, 232, 248);
     private static readonly Color Blue = Color.FromArgb(82, 168, 255);
     private static readonly Color Green = Color.FromArgb(58, 214, 122);
     private static readonly Font TitleFont = new("Microsoft YaHei UI", 12F, FontStyle.Regular);
@@ -9447,13 +9448,14 @@ internal sealed class DesktopSystemMonitorWidgetView : Control
     {
         var g = e.Graphics;
         g.SmoothingMode = SmoothingMode.AntiAlias;
+        g.TextRenderingHint = System.Drawing.Text.TextRenderingHint.AntiAliasGridFit;
         var card = new Rectangle(0, 0, Width - 1, Height - 1);
         if (card.Width < 220 || card.Height < 140)
         {
             return;
         }
 
-        FillRound(g, card, _transparent ? Color.FromArgb(70, 24, 34, 48) : CardFill, 10);
+        FillRound(g, card, _transparent ? Color.FromArgb(120, 20, 28, 40) : CardFill, 10);
         DrawRound(g, card, _transparent ? Color.FromArgb(132, 150, 194, 238) : CardBorder, 10);
         DrawHeader(g, card);
         DrawMetrics(g, new Rectangle(card.X + 14, card.Y + 58, card.Width - 28, card.Height - 70));
@@ -10112,7 +10114,7 @@ internal sealed class DesktopProjectWidgetForm : Form
         _view.BackColor = BackColor;
         if (IsHandleCreated)
         {
-            NativeGlass.EnableAcrylic(Handle, _transparent ? Color.FromArgb(34, 74, 138, 210) : Color.FromArgb(232, 18, 26, 38));
+            NativeGlass.EnableAcrylic(Handle, _transparent ? Color.FromArgb(95, 20, 28, 40) : Color.FromArgb(232, 18, 26, 38));
         }
 
         _view.Invalidate();
@@ -10215,12 +10217,12 @@ internal sealed class DesktopProjectWidgetView : Control
     private static readonly Color CardFill = Color.FromArgb(222, 24, 34, 48);
     private static readonly Color CardBorder = Color.FromArgb(98, 126, 154, 184);
     private static readonly Color PanelFill = Color.FromArgb(48, 58, 76);
-    private Color CurrentPanelFill => _transparent ? Color.FromArgb(58, 48, 58, 76) : PanelFill;
+    private Color CurrentPanelFill => _transparent ? Color.FromArgb(118, 12, 18, 30) : PanelFill;
     private Color CurrentTabFill(bool selected) => selected
         ? (_transparent ? Color.FromArgb(132, Blue.R, Blue.G, Blue.B) : Blue)
-        : (_transparent ? Color.FromArgb(54, 52, 64, 84) : Color.FromArgb(52, 64, 84));
-    private static readonly Color TextMain = Color.FromArgb(242, 246, 252);
-    private static readonly Color TextMuted = Color.FromArgb(170, 188, 210);
+        : (_transparent ? Color.FromArgb(90, 52, 64, 84) : Color.FromArgb(52, 64, 84));
+    private static readonly Color TextMain = Color.FromArgb(252, 255, 255);
+    private static readonly Color TextMuted = Color.FromArgb(218, 232, 248);
     private static readonly Color Blue = Color.FromArgb(46, 126, 246);
     private static readonly Color Green = Color.FromArgb(58, 214, 122);
     private static readonly Font TitleFont = new("Microsoft YaHei UI", 12F, FontStyle.Regular);
@@ -10566,12 +10568,13 @@ internal sealed class DesktopProjectWidgetView : Control
     {
         var g = e.Graphics;
         g.SmoothingMode = SmoothingMode.AntiAlias;
+        g.TextRenderingHint = System.Drawing.Text.TextRenderingHint.AntiAliasGridFit;
         _projectAreas.Clear();
         _phaseAreas.Clear();
         var projects = Projects();
 
         var card = new Rectangle(0, 0, Width, Height);
-        FillRound(g, card, _transparent ? Color.FromArgb(70, 24, 34, 48) : CardFill, 10);
+        FillRound(g, card, _transparent ? Color.FromArgb(120, 20, 28, 40) : CardFill, 10);
         DrawRound(g, new Rectangle(0, 0, Width - 1, Height - 1), CardBorder, 10);
 
         var headerIcon = new Rectangle(18, 14, 20, 20);
@@ -10903,11 +10906,14 @@ internal sealed class DesktopTodoWidgetView : Control
     private readonly System.Windows.Forms.Timer _clockTimer = new() { Interval = 30000 };
     private readonly List<(Rectangle Rect, TodoItem Item)> _checkAreas = new();
     private readonly List<(Rectangle Rect, TodoItem Item)> _rowAreas = new();
+    private readonly List<(Rectangle Rect, DateTime Date)> _overdueDateAreas = new();
     private readonly Image? _settingsIcon;
     private bool _transparent;
     private bool _positionLocked;
     private bool _showCompleted;
+    private DateTime _selectedDate = DateTime.Today;
     private Rectangle _headerRect;
+    private Rectangle _todayTitleRect;
     private Rectangle _settingsRect;
     private Rectangle _completedRect;
     private Rectangle _resizeRect;
@@ -10916,9 +10922,9 @@ internal sealed class DesktopTodoWidgetView : Control
     private static readonly Color CardFill = Color.FromArgb(222, 24, 34, 48);
     private static readonly Color CardBorder = Color.FromArgb(96, 104, 130, 156);
     private static readonly Color ContentFill = Color.FromArgb(190, 8, 14, 24);
-    private static readonly Color TransparentContentFill = Color.FromArgb(58, 48, 58, 76);
-    private static readonly Color TextMain = Color.FromArgb(242, 246, 252);
-    private static readonly Color TextSubtle = Color.FromArgb(166, 184, 207);
+    private static readonly Color TransparentContentFill = Color.FromArgb(118, 12, 18, 30);
+    private static readonly Color TextMain = Color.FromArgb(252, 255, 255);
+    private static readonly Color TextSubtle = Color.FromArgb(218, 232, 248);
     private static readonly Font TitleFont = new("Microsoft YaHei UI", 13F, FontStyle.Regular);
     private static readonly Font NormalFont = new("Microsoft YaHei UI", 9.5F);
     private static readonly Font SmallFont = new("Microsoft YaHei UI", 8.5F);
@@ -11088,9 +11094,26 @@ internal sealed class DesktopTodoWidgetView : Control
             return;
         }
 
+        var overdueHit = _overdueDateAreas.FirstOrDefault(item => item.Rect.Contains(e.Location));
+        if (overdueHit.Date != default)
+        {
+            _selectedDate = overdueHit.Date.Date;
+            _showCompleted = false;
+            Invalidate();
+            return;
+        }
+
         if (_completedRect.Contains(e.Location))
         {
             _showCompleted = !_showCompleted;
+            Invalidate();
+            return;
+        }
+
+        if (_todayTitleRect.Contains(e.Location))
+        {
+            _selectedDate = DateTime.Today;
+            _showCompleted = false;
             Invalidate();
             return;
         }
@@ -11121,7 +11144,7 @@ internal sealed class DesktopTodoWidgetView : Control
         UpdateToolTip(e.Location);
         Cursor = _resizeRect.Contains(e.Location)
             ? Cursors.SizeNWSE
-            : _settingsRect.Contains(e.Location) || _completedRect.Contains(e.Location) || _checkAreas.Any(item => item.Rect.Contains(e.Location)) || _rowAreas.Any(item => item.Rect.Contains(e.Location))
+            : _settingsRect.Contains(e.Location) || _completedRect.Contains(e.Location) || _todayTitleRect.Contains(e.Location) || _overdueDateAreas.Any(item => item.Rect.Contains(e.Location)) || _checkAreas.Any(item => item.Rect.Contains(e.Location)) || _rowAreas.Any(item => item.Rect.Contains(e.Location))
                 ? Cursors.Hand
                 : Cursors.Default;
         base.OnMouseMove(e);
@@ -11138,8 +11161,10 @@ internal sealed class DesktopTodoWidgetView : Control
     {
         var g = e.Graphics;
         g.SmoothingMode = SmoothingMode.AntiAlias;
+        g.TextRenderingHint = System.Drawing.Text.TextRenderingHint.AntiAliasGridFit;
         _checkAreas.Clear();
         _rowAreas.Clear();
+        _overdueDateAreas.Clear();
 
         var card = new Rectangle(0, 0, Width - 1, Height - 1);
         if (card.Width < 220 || card.Height < 160)
@@ -11147,7 +11172,7 @@ internal sealed class DesktopTodoWidgetView : Control
             return;
         }
 
-        FillRound(g, card, _transparent ? Color.FromArgb(70, 24, 34, 48) : CardFill, 10);
+        FillRound(g, card, _transparent ? Color.FromArgb(120, 20, 28, 40) : CardFill, 10);
         DrawRound(g, _transparent ? Color.FromArgb(132, 150, 194, 238) : CardBorder, card, 10);
         DrawHeader(g, card);
         DrawTodos(g, card);
@@ -11162,13 +11187,17 @@ internal sealed class DesktopTodoWidgetView : Control
         var title = "▣  今日工作记录";
         var titleWidth = Math.Min(TextRenderer.MeasureText(title, TitleFont).Width, Math.Max(120, _headerRect.Width / 2));
         var titleRect = new Rectangle(_headerRect.X, _headerRect.Y, titleWidth, _headerRect.Height);
-        TextRenderer.DrawText(g, title, TitleFont, titleRect, TextMain, TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis | TextFormatFlags.NoPadding | TextFormatFlags.PreserveGraphicsClipping);
+        _todayTitleRect = titleRect;
+        DrawSingleLineText(g, title, TitleFont, titleRect, TextMain);
 
         var dateX = titleRect.Right + 12;
         var dateRect = new Rectangle(dateX, _headerRect.Y + 2, Math.Max(1, _headerRect.Right - dateX), _headerRect.Height - 2);
         var now = DateTime.Now;
-        var dateText = $"{now:yyyy-MM-dd HH:mm}  {WeekText(now.DayOfWeek)}  {LunarText(now)}";
-        TextRenderer.DrawText(g, dateText, SmallFont, dateRect, TextSubtle, TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis | TextFormatFlags.NoPadding | TextFormatFlags.PreserveGraphicsClipping);
+        var displayDate = _selectedDate.Date == DateTime.Today ? now : _selectedDate.Date;
+        var dateText = _selectedDate.Date == DateTime.Today
+            ? $"{now:yyyy-MM-dd HH:mm}  {WeekText(now.DayOfWeek)}  {LunarText(now)}"
+            : $"{displayDate:yyyy-MM-dd}  {WeekText(displayDate.DayOfWeek)}  {LunarText(displayDate)}";
+        DrawSingleLineText(g, dateText, SmallFont, dateRect, TextSubtle);
 
         if (_settingsIcon is not null)
         {
@@ -11189,10 +11218,11 @@ internal sealed class DesktopTodoWidgetView : Control
         FillRound(g, panel, _transparent ? TransparentContentFill : ContentFill, 7);
         var list = new Rectangle(panel.X + 10, panel.Y + 8, panel.Width - 20, Math.Max(1, panel.Height - 16));
         var rowCount = Math.Max(1, list.Height / 34);
-        var items = (_showCompleted ? _todos.Items : _todos.Items.Where(item => !item.Done)).Take(rowCount).ToArray();
+        var dayItems = ItemsForSelectedDate();
+        var items = (_showCompleted ? dayItems : dayItems.Where(item => !item.Done)).Take(rowCount).ToArray();
         if (items.Length == 0)
         {
-            DrawCentered(g, "暂无待办任务", NormalFont, TextSubtle, list);
+            DrawCenteredText(g, _selectedDate.Date == DateTime.Today ? "今日暂无待办任务" : "当天暂无未完成任务", NormalFont, TextSubtle, list);
             return;
         }
 
@@ -11217,8 +11247,8 @@ internal sealed class DesktopTodoWidgetView : Control
             var timeWidth = 44;
             var textRight = row.Right - badgeWidth - timeWidth - 18;
             var textRect = new Rectangle(row.X + 26, row.Y + 4, Math.Max(40, textRight - row.X - 26), 22);
-            TextRenderer.DrawText(g, item.Text, NormalFont, textRect, item.Done ? TextSubtle : TextMain, TextFormatFlags.EndEllipsis | TextFormatFlags.VerticalCenter | TextFormatFlags.NoPadding);
-            DrawText(g, item.CreatedAt.ToString("HH:mm"), SmallFont, TextSubtle, row.Right - badgeWidth - timeWidth - 8, row.Y + 8);
+            DrawSingleLineText(g, item.Text, NormalFont, textRect, item.Done ? TextSubtle : TextMain);
+            DrawSingleLineText(g, item.CreatedAt.ToString("HH:mm"), SmallFont, new Rectangle(row.Right - badgeWidth - timeWidth - 8, row.Y + 4, timeWidth, 24), TextSubtle);
             DrawBadge(g, tagText, new Rectangle(row.Right - badgeWidth, row.Y + 3, badgeWidth, 23), GetTagColor(item.Tag));
         }
     }
@@ -11226,7 +11256,8 @@ internal sealed class DesktopTodoWidgetView : Control
     private void DrawFooter(Graphics g, Rectangle card)
     {
         _completedRect = new Rectangle(card.X + 12, card.Bottom - 42, 148, 34);
-        DrawText(g, $"已完成（{_todos.Items.Count(item => item.Done)}）", NormalFont, TextSubtle, card.X + 16, card.Bottom - 34);
+        DrawSingleLineText(g, $"已完成（{ItemsForSelectedDate().Count(item => item.Done)}）", NormalFont, new Rectangle(card.X + 16, card.Bottom - 39, 180, 28), TextSubtle);
+        DrawOverdueDateDots(g, card);
     }
 
     private void DrawResizeGrip(Graphics g, Rectangle card)
@@ -11256,8 +11287,71 @@ internal sealed class DesktopTodoWidgetView : Control
         return TagPalette[Math.Abs(tag.Trim().GetHashCode()) % TagPalette.Length];
     }
 
+    private TodoItem[] ItemsForSelectedDate()
+    {
+        var date = _selectedDate.Date;
+        return _todos.Items
+            .Where(item => item.CreatedAt.Date == date)
+            .OrderBy(item => item.CreatedAt)
+            .ToArray();
+    }
+
+    private void DrawOverdueDateDots(Graphics g, Rectangle card)
+    {
+        var groups = _todos.Items
+            .Where(item => !item.Done && item.CreatedAt.Date < DateTime.Today)
+            .GroupBy(item => item.CreatedAt.Date)
+            .OrderByDescending(group => group.Key)
+            .ToArray();
+
+        if (groups.Length == 0)
+        {
+            return;
+        }
+
+        const int dotSize = 10;
+        const int hitSize = 20;
+        var x = _completedRect.Right + 10;
+        var y = card.Bottom - 28;
+        var maxX = card.Right - 34;
+        using var fill = new SolidBrush(Color.FromArgb(255, 78, 84));
+        using var selectedPen = new Pen(Color.FromArgb(245, 255, 255), 1.4F);
+        foreach (var group in groups)
+        {
+            if (x + dotSize > maxX)
+            {
+                break;
+            }
+
+            var dot = new Rectangle(x, y, dotSize, dotSize);
+            g.FillEllipse(fill, dot);
+            if (group.Key == _selectedDate.Date)
+            {
+                g.DrawEllipse(selectedPen, new Rectangle(dot.X - 2, dot.Y - 2, dot.Width + 4, dot.Height + 4));
+            }
+
+            _overdueDateAreas.Add((new Rectangle(dot.X - 5, dot.Y - 5, hitSize, hitSize), group.Key));
+            x += 18;
+        }
+    }
+
     private void UpdateToolTip(Point location)
     {
+        var overdueHit = _overdueDateAreas.FirstOrDefault(item => item.Rect.Contains(location));
+        if (overdueHit.Date != default)
+        {
+            var count = _todos.Items.Count(item => !item.Done && item.CreatedAt.Date == overdueHit.Date.Date);
+            var overdueKey = $"overdue|{overdueHit.Date:yyyyMMdd}";
+            if (string.Equals(_hoverKey, overdueKey, StringComparison.Ordinal))
+            {
+                return;
+            }
+
+            _hoverKey = overdueKey;
+            _tip.SetToolTip(this, $"{overdueHit.Date:yyyy-MM-dd} 未完成 {count} 项");
+            return;
+        }
+
         var rowHit = _rowAreas.FirstOrDefault(item => item.Rect.Contains(location));
         var key = rowHit.Item is null ? null : $"{rowHit.Item.Text}|{rowHit.Item.CreatedAt.Ticks}";
         if (string.Equals(_hoverKey, key, StringComparison.Ordinal))
@@ -11328,7 +11422,7 @@ internal sealed class DesktopTodoWidgetView : Control
     {
         FillRound(g, rect, Color.FromArgb(78, color), 5);
         DrawRound(g, color, rect, 5);
-        DrawCentered(g, text, SmallFont, Color.White, rect);
+        DrawCenteredText(g, text, SmallFont, Color.White, rect);
     }
 
     private static void DrawGearIcon(Graphics g, Rectangle rect, Color color)
@@ -11426,14 +11520,27 @@ internal sealed class DesktopTodoWidgetView : Control
         return path;
     }
 
-    private static void DrawText(Graphics g, string text, Font font, Color color, int x, int y)
+    private static void DrawSingleLineText(Graphics g, string text, Font font, Rectangle rect, Color color)
     {
-        TextRenderer.DrawText(g, text, font, new Point(x, y), color, TextFormatFlags.NoPadding | TextFormatFlags.PreserveGraphicsClipping);
+        using var brush = new SolidBrush(Color.FromArgb(255, color.R, color.G, color.B));
+        using var format = new StringFormat(StringFormatFlags.NoWrap)
+        {
+            LineAlignment = StringAlignment.Center,
+            Trimming = StringTrimming.EllipsisCharacter
+        };
+        g.DrawString(text, font, brush, rect, format);
     }
 
-    private static void DrawCentered(Graphics g, string text, Font font, Color color, Rectangle rect)
+    private static void DrawCenteredText(Graphics g, string text, Font font, Color color, Rectangle rect)
     {
-        TextRenderer.DrawText(g, text, font, rect, color, TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis | TextFormatFlags.NoPadding | TextFormatFlags.PreserveGraphicsClipping);
+        using var brush = new SolidBrush(Color.FromArgb(255, color.R, color.G, color.B));
+        using var format = new StringFormat(StringFormatFlags.NoWrap)
+        {
+            Alignment = StringAlignment.Center,
+            LineAlignment = StringAlignment.Center,
+            Trimming = StringTrimming.EllipsisCharacter
+        };
+        g.DrawString(text, font, brush, rect, format);
     }
 }
 
@@ -13339,7 +13446,7 @@ internal sealed class DesktopOrganizerWidgetForm : Form
         if (IsHandleCreated)
         {
             var tint = _config.DesktopWidgetTransparent
-                ? Color.FromArgb(34, 74, 138, 210)
+                ? Color.FromArgb(95, 20, 28, 40)
                 : Color.FromArgb(232, 18, 26, 38);
             NativeGlass.EnableAcrylic(Handle, tint);
         }
@@ -13743,8 +13850,8 @@ internal sealed class DesktopOrganizerWidgetView : Control
     private static readonly Color CardBorder = Color.FromArgb(92, 100, 123, 152);
     private static readonly Color PanelFill = Color.FromArgb(126, 17, 25, 37);
     private static readonly Color RowLine = Color.FromArgb(52, 92, 110, 136);
-    private static readonly Color TextMain = Color.FromArgb(238, 244, 252);
-    private static readonly Color TextMuted = Color.FromArgb(158, 174, 194);
+    private static readonly Color TextMain = Color.FromArgb(252, 255, 255);
+    private static readonly Color TextMuted = Color.FromArgb(218, 232, 248);
     private static readonly Color Accent = Color.FromArgb(58, 109, 248);
     private static readonly Font HeaderFont = new("Microsoft YaHei UI", 11.5F, FontStyle.Regular);
     private static readonly Font TitleFont = new("Microsoft YaHei UI", 10.5F, FontStyle.Regular);
@@ -13752,9 +13859,9 @@ internal sealed class DesktopOrganizerWidgetView : Control
     private static readonly Font SmallFont = new("Microsoft YaHei UI", 8F);
     private static readonly Font IconFont = new("Microsoft YaHei UI", 11F, FontStyle.Bold);
 
-    private Color CurrentCardFill => _config.DesktopWidgetTransparent ? Color.FromArgb(74, 18, 30, 46) : CardFill;
+    private Color CurrentCardFill => _config.DesktopWidgetTransparent ? Color.FromArgb(120, 20, 28, 40) : CardFill;
     private Color CurrentCardBorder => _config.DesktopWidgetTransparent ? Color.FromArgb(132, 150, 194, 238) : CardBorder;
-    private Color CurrentPanelFill => _config.DesktopWidgetTransparent ? Color.FromArgb(44, 10, 22, 36) : PanelFill;
+    private Color CurrentPanelFill => _config.DesktopWidgetTransparent ? Color.FromArgb(118, 12, 18, 30) : PanelFill;
     private int CurrentIconSize => Math.Clamp(_config.DesktopOrganizerIconSize <= 0 ? 48 : _config.DesktopOrganizerIconSize, MinOrganizerIconSize, MaxOrganizerIconSize);
     private int CurrentTileHeight => Math.Max(BasePreviewTileHeight, CurrentIconSize + (_config.DesktopOrganizerShowNames ? 58 : 30));
 
@@ -14718,6 +14825,7 @@ internal sealed class DesktopOrganizerWidgetView : Control
     {
         var g = e.Graphics;
         g.SmoothingMode = SmoothingMode.AntiAlias;
+        g.TextRenderingHint = System.Drawing.Text.TextRenderingHint.AntiAliasGridFit;
         _hotspots.Clear();
         _previewAreas.Clear();
         _categoryTabAreas.Clear();
@@ -16239,7 +16347,7 @@ internal sealed class DesktopClipboardWidgetForm : Form
         _view.BackColor = BackColor;
         if (IsHandleCreated)
         {
-            NativeGlass.EnableAcrylic(Handle, _transparent ? Color.FromArgb(34, 74, 138, 210) : Color.FromArgb(232, 18, 26, 38));
+            NativeGlass.EnableAcrylic(Handle, _transparent ? Color.FromArgb(95, 20, 28, 40) : Color.FromArgb(232, 18, 26, 38));
         }
 
         _view.Invalidate();
@@ -16406,8 +16514,8 @@ internal sealed class DesktopClipboardWidgetView : Control
 
     private static readonly Color CardFill = Color.FromArgb(222, 24, 34, 48);
     private static readonly Color CardBorder = Color.FromArgb(98, 126, 154, 184);
-    private static readonly Color TextMain = Color.FromArgb(242, 246, 252);
-    private static readonly Color TextMuted = Color.FromArgb(170, 188, 210);
+    private static readonly Color TextMain = Color.FromArgb(252, 255, 255);
+    private static readonly Color TextMuted = Color.FromArgb(218, 232, 248);
     private static readonly Color Blue = Color.FromArgb(82, 160, 255);
     private static readonly Font TitleFont = new("Microsoft YaHei UI", 12F, FontStyle.Regular);
     private static readonly Font NormalFont = new("Microsoft YaHei UI", 9.5F);
@@ -16733,7 +16841,7 @@ internal sealed class DesktopClipboardWidgetView : Control
     {
         var g = e.Graphics;
         g.SmoothingMode = SmoothingMode.AntiAlias;
-        g.TextRenderingHint = System.Drawing.Text.TextRenderingHint.ClearTypeGridFit;
+        g.TextRenderingHint = System.Drawing.Text.TextRenderingHint.AntiAliasGridFit;
         _itemAreas.Clear();
         var card = new Rectangle(0, 0, Width - 1, Height - 1);
         if (card.Width < 220 || card.Height < 150)
@@ -16741,7 +16849,7 @@ internal sealed class DesktopClipboardWidgetView : Control
             return;
         }
 
-        using (var fill = new SolidBrush(_transparent ? Color.FromArgb(72, 18, 30, 46) : CardFill))
+        using (var fill = new SolidBrush(_transparent ? Color.FromArgb(120, 20, 28, 40) : CardFill))
         using (var path = RoundPath(card, 10))
         {
             g.FillPath(fill, path);
@@ -23030,7 +23138,12 @@ internal static class ShellIconLoader
 {
     private const uint ShgfiIcon = 0x000000100;
     private const uint ShgfiLargeIcon = 0x000000000;
-    private const uint SigaFsiSysIconIndex = 0x00004000;
+    private const uint ShgfiSysIconIndex = 0x000004000;
+    private const int ShilLarge = 0x0;
+    private const int ShilExtraLarge = 0x2;
+    private const int ShilJumbo = 0x4;
+    private const int IldTransparent = 0x1;
+    private const int PreferredIconSize = 64;
     private const int MaxPath = 260;
 
     public static Image? LoadLargeIcon(string path)
@@ -23046,6 +23159,18 @@ internal static class ShellIconLoader
 
     private static Image? LoadShellIcon(string path)
     {
+        var extractedIcon = ExtractIconBitmap(path, 0, PreferredIconSize);
+        if (extractedIcon is not null)
+        {
+            return extractedIcon;
+        }
+
+        var highResolutionIcon = LoadShellImageListIcon(path);
+        if (highResolutionIcon is not null)
+        {
+            return highResolutionIcon;
+        }
+
         try
         {
             var result = SHGetFileInfo(
@@ -23076,6 +23201,76 @@ internal static class ShellIconLoader
         }
     }
 
+    private static Image? LoadShellImageListIcon(string path)
+    {
+        try
+        {
+            var result = SHGetFileInfo(
+                path,
+                0,
+                out var fileInfo,
+                (uint)Marshal.SizeOf<SHFILEINFO>(),
+                ShgfiSysIconIndex);
+
+            if (result == IntPtr.Zero || fileInfo.iIcon < 0)
+            {
+                return null;
+            }
+
+            foreach (var imageListSize in new[] { ShilJumbo, ShilExtraLarge, ShilLarge })
+            {
+                var image = LoadImageListIcon(fileInfo.iIcon, imageListSize);
+                if (image is not null)
+                {
+                    return image;
+                }
+            }
+        }
+        catch
+        {
+        }
+
+        return null;
+    }
+
+    private static Image? LoadImageListIcon(int iconIndex, int imageListSize)
+    {
+        IImageList? imageList = null;
+        var iconHandle = IntPtr.Zero;
+        try
+        {
+            var imageListId = typeof(IImageList).GUID;
+            if (SHGetImageList(imageListSize, ref imageListId, out imageList) < 0 || imageList is null)
+            {
+                return null;
+            }
+
+            if (imageList.GetIcon(iconIndex, IldTransparent, ref iconHandle) < 0 || iconHandle == IntPtr.Zero)
+            {
+                return null;
+            }
+
+            using var icon = (Icon)Icon.FromHandle(iconHandle).Clone();
+            return icon.ToBitmap();
+        }
+        catch
+        {
+            return null;
+        }
+        finally
+        {
+            if (iconHandle != IntPtr.Zero)
+            {
+                DestroyIcon(iconHandle);
+            }
+
+            if (imageList is not null)
+            {
+                Marshal.FinalReleaseComObject(imageList);
+            }
+        }
+    }
+
     private static bool TryLoadShortcutTargetIcon(string shortcutPath, out Image? image)
     {
         image = null;
@@ -23092,7 +23287,7 @@ internal static class ShellIconLoader
             var configuredIcon = Environment.ExpandEnvironmentVariables(iconPath.ToString());
             if (!string.IsNullOrWhiteSpace(configuredIcon) && File.Exists(configuredIcon))
             {
-                image = ExtractIconBitmap(configuredIcon, iconIndex);
+                image = ExtractIconBitmap(configuredIcon, iconIndex, PreferredIconSize);
                 if (image is not null)
                 {
                     return true;
@@ -23104,7 +23299,7 @@ internal static class ShellIconLoader
             var target = Environment.ExpandEnvironmentVariables(targetPath.ToString());
             if (!string.IsNullOrWhiteSpace(target) && (File.Exists(target) || Directory.Exists(target)))
             {
-                image = LoadShellIcon(target);
+                image = ExtractIconBitmap(target, 0, PreferredIconSize) ?? LoadShellIcon(target);
                 return image is not null;
             }
         }
@@ -23122,24 +23317,26 @@ internal static class ShellIconLoader
         return false;
     }
 
-    private static Image? ExtractIconBitmap(string path, int iconIndex)
+    private static Image? ExtractIconBitmap(string path, int iconIndex, int size)
     {
         try
         {
-            var count = ExtractIconEx(path, iconIndex, out var largeIcon, out _, 1);
-            if (count <= 0 || largeIcon == IntPtr.Zero)
+            var icons = new IntPtr[1];
+            var iconIds = new uint[1];
+            var count = PrivateExtractIcons(path, iconIndex, size, size, icons, iconIds, 1, 0);
+            if (count == 0 || icons[0] == IntPtr.Zero)
             {
                 return null;
             }
 
             try
             {
-                using var icon = (Icon)Icon.FromHandle(largeIcon).Clone();
+                using var icon = (Icon)Icon.FromHandle(icons[0]).Clone();
                 return icon.ToBitmap();
             }
             finally
             {
-                DestroyIcon(largeIcon);
+                DestroyIcon(icons[0]);
             }
         }
         catch
@@ -23160,8 +23357,26 @@ internal static class ShellIconLoader
     [return: MarshalAs(UnmanagedType.Bool)]
     private static extern bool DestroyIcon(IntPtr hIcon);
 
-    [DllImport("shell32.dll", CharSet = CharSet.Unicode)]
-    private static extern uint ExtractIconEx(string fileName, int iconIndex, out IntPtr largeIcon, out IntPtr smallIcon, uint icons);
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)]
+    private static extern uint PrivateExtractIcons(string fileName, int iconIndex, int iconWidth, int iconHeight, IntPtr[] iconHandles, uint[] iconIds, uint icons, uint flags);
+
+    [DllImport("shell32.dll", SetLastError = true)]
+    private static extern int SHGetImageList(int imageList, ref Guid riid, out IImageList? imageListObject);
+
+    [ComImport]
+    [Guid("46EB5926-582E-4017-9FDF-E8998DAA0950")]
+    [InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+    private interface IImageList
+    {
+        [PreserveSig] int Add(IntPtr image, IntPtr mask, ref int index);
+        [PreserveSig] int ReplaceIcon(int index, IntPtr icon, ref int newIndex);
+        [PreserveSig] int SetOverlayImage(int image, int overlay);
+        [PreserveSig] int Replace(int index, IntPtr image, IntPtr mask);
+        [PreserveSig] int AddMasked(IntPtr image, int maskColor, ref int index);
+        [PreserveSig] int Draw(IntPtr drawParams);
+        [PreserveSig] int Remove(int index);
+        [PreserveSig] int GetIcon(int index, int flags, ref IntPtr icon);
+    }
 
     [ComImport]
     [Guid("00021401-0000-0000-C000-000000000046")]
@@ -23499,8 +23714,6 @@ internal static class GraphicsExtensions
         return path;
     }
 }
-
-
 
 
 

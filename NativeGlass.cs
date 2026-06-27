@@ -5,6 +5,7 @@ namespace DustDesk;
 
 internal static class NativeGlass
 {
+    private const int AccentEnableTransparentGradient = 2;
     private const int AccentEnableAcrylicBlurBehind = 4;
     private const int WmNclButtonDown = 0xA1;
     private const int HtCaption = 0x2;
@@ -38,7 +39,7 @@ internal static class NativeGlass
 
         var accent = new AccentPolicy
         {
-            AccentState = AccentEnableAcrylicBlurBehind,
+            AccentState = tint.A < 96 ? AccentEnableTransparentGradient : AccentEnableAcrylicBlurBehind,
             GradientColor = ToAbgr(tint)
         };
 
