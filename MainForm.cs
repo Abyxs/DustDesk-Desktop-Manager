@@ -85,6 +85,7 @@ public sealed class MainForm : Form
     private DesktopSearchWidgetForm? _desktopSearchWidget;
     private DesktopClipboardWidgetForm? _desktopClipboardWidget;
     private readonly List<DesktopOrganizerWidgetForm> _desktopOrganizerSplitWidgets = new();
+    private readonly Dictionary<DesktopOrganizerWidgetForm, List<DeskCategory>> _desktopOrganizerSplitWidgetCategories = new();
     private readonly HashSet<DeskCategory> _splitDesktopCategories = new();
     private readonly List<DesktopProjectWidgetForm> _desktopProjectSplitWidgets = new();
     private readonly HashSet<string> _splitProjectIds = new(StringComparer.Ordinal);
@@ -160,6 +161,8 @@ public sealed class MainForm : Form
         {
             Shown += (_, _) => BeginInvoke(new Action(HideToTray));
         }
+
+        Shown += (_, _) => BeginInvoke(new Action(CheckForUpdatesOnStartup));
     }
 
     protected override CreateParams CreateParams
@@ -175,7 +178,7 @@ public sealed class MainForm : Form
     protected override void OnHandleCreated(EventArgs e)
     {
         base.OnHandleCreated(e);
-        NativeGlass.EnableAcrylic(Handle, Color.FromArgb(245, 18, 26, 38));
+        NativeGlass.ApplyDarkWindowFrame(Handle);
         _clipboardListenerRegistered = AddClipboardFormatListener(Handle);
         BeginInvoke(new Action(CaptureClipboardSnapshot));
         RegisterMainWindowHotKey();
@@ -468,7 +471,7 @@ public sealed class MainForm : Form
         });
         statusBar.Controls.Add(new Label
         {
-            Text = "版本：v1.2.0",
+            Text = $"版本：v{UpdateChecker.CurrentVersionText}",
             Dock = DockStyle.Right,
             Width = 150,
             ForeColor = TextColorSubtle,
@@ -1738,7 +1741,7 @@ public sealed class MainForm : Form
                 Activate();
                 _nav.SelectedIndex = 1;
             };
-            _desktopOrganizerWidget.SplitRequested += SplitDesktopOrganizerWidget;
+            _desktopOrganizerWidget.SplitRequested += SplitDesktopOrganizerWidgets;
             _desktopOrganizerWidget.FormClosed += (_, _) =>
             {
                 if (!_closingApp && _config.DesktopOrganizerWidget is not null)
@@ -1789,19 +1792,36 @@ public sealed class MainForm : Form
         ShowDesktopOrganizerWidget();
     }
 
-    private void SplitDesktopOrganizerWidget(DeskCategory category)
+    private void SplitDesktopOrganizerWidgets(IReadOnlyList<DeskCategory> categories)
     {
-        if (_splitDesktopCategories.Contains(category))
+        var targets = categories
+            .Where(category => _config.DesktopCategories.Contains(category))
+            .Distinct()
+            .Where(category => !_splitDesktopCategories.Contains(category))
+            .ToArray();
+        SplitDesktopOrganizerWidget(targets);
+
+        _desktopOrganizerWidget?.RefreshWidget();
+    }
+
+    private void SplitDesktopOrganizerWidget(IReadOnlyList<DeskCategory> categories, int cascadeIndex = 0)
+    {
+        if (categories.Count == 0)
         {
             return;
         }
 
-        _splitDesktopCategories.Add(category);
+        var splitCategories = categories.ToList();
+        foreach (var category in splitCategories)
+        {
+            _splitDesktopCategories.Add(category);
+        }
+
         var splitWidget = new DesktopOrganizerWidgetForm(
             _config,
             _store,
             _ => { },
-            () => _config.DesktopCategories.Where(item => ReferenceEquals(item, category)),
+            () => splitCategories.Where(item => _config.DesktopCategories.Contains(item)),
             isSplit: true);
         splitWidget.ManageRequested += () =>
         {
@@ -1811,19 +1831,105 @@ public sealed class MainForm : Form
             Activate();
             _nav.SelectedIndex = 1;
         };
-        splitWidget.MergeRequested += () => splitWidget.Close();
+        splitWidget.MergeRequested += target => MergeDesktopOrganizerSplitWidget(splitWidget, target);
         splitWidget.FormClosed += (_, _) =>
         {
             _desktopOrganizerSplitWidgets.Remove(splitWidget);
+            _desktopOrganizerSplitWidgetCategories.Remove(splitWidget);
             if (!_closingApp)
             {
-                _splitDesktopCategories.Remove(category);
+                foreach (var item in splitCategories)
+                {
+                    _splitDesktopCategories.Remove(item);
+                }
+
                 _desktopOrganizerWidget?.RefreshWidget();
+                RefreshOrganizerMergeTargets();
             }
         };
         _desktopOrganizerSplitWidgets.Add(splitWidget);
-        splitWidget.ShowAsDesktopWidget();
-        _desktopOrganizerWidget?.RefreshWidget();
+        _desktopOrganizerSplitWidgetCategories[splitWidget] = splitCategories;
+        RefreshOrganizerMergeTargets();
+        splitWidget.ShowAsDesktopWidget(CreateOrganizerSplitPlacement(cascadeIndex));
+    }
+
+    private void MergeDesktopOrganizerSplitWidget(DesktopOrganizerWidgetForm source, DesktopOrganizerMergeTarget target)
+    {
+        if (!_desktopOrganizerSplitWidgetCategories.TryGetValue(source, out var sourceCategories))
+        {
+            source.Close();
+            return;
+        }
+
+        if (target.IsMain)
+        {
+            source.Close();
+            return;
+        }
+
+        var targetWidget = _desktopOrganizerSplitWidgetCategories.Keys.FirstOrDefault(widget => ReferenceEquals(widget, target.Widget));
+        if (targetWidget is null || ReferenceEquals(targetWidget, source))
+        {
+            return;
+        }
+
+        if (!_desktopOrganizerSplitWidgetCategories.TryGetValue(targetWidget, out var targetCategories))
+        {
+            return;
+        }
+
+        foreach (var category in sourceCategories.Where(category => !targetCategories.Contains(category)).ToArray())
+        {
+            targetCategories.Add(category);
+        }
+
+        sourceCategories.Clear();
+        targetWidget.RefreshWidget();
+        source.Close();
+    }
+
+    private void RefreshOrganizerMergeTargets()
+    {
+        var splitWidgets = _desktopOrganizerSplitWidgets
+            .Where(widget => !widget.IsDisposed)
+            .ToArray();
+        foreach (var widget in splitWidgets)
+        {
+            var targets = new List<DesktopOrganizerMergeTarget>
+            {
+                DesktopOrganizerMergeTarget.MainTarget()
+            };
+            targets.AddRange(splitWidgets
+                .Where(targetWidget => !ReferenceEquals(targetWidget, widget))
+                .Select(targetWidget => DesktopOrganizerMergeTarget.Split(targetWidget, GetOrganizerSplitWidgetTitle(targetWidget))));
+            widget.SetMergeTargets(targets);
+        }
+    }
+
+    private string GetOrganizerSplitWidgetTitle(DesktopOrganizerWidgetForm widget)
+    {
+        if (!_desktopOrganizerSplitWidgetCategories.TryGetValue(widget, out var categories) || categories.Count == 0)
+        {
+            return "空组件";
+        }
+
+        return string.Join("、", categories.Select(category => category.Name).Where(name => !string.IsNullOrWhiteSpace(name)));
+    }
+
+    private static WidgetPlacement CreateOrganizerSplitPlacement(int cascadeIndex)
+    {
+        var workArea = Screen.PrimaryScreen?.WorkingArea ?? new Rectangle(0, 0, 1280, 720);
+        const int width = 620;
+        const int height = 520;
+        var offset = Math.Max(0, cascadeIndex) * 32;
+        return new WidgetPlacement
+        {
+            X = workArea.Right - width - 36 + offset,
+            Y = workArea.Top + 88 + offset,
+            Width = width,
+            Height = height,
+            Visible = true
+        };
     }
 
     private void ShowDesktopTodoWidget(bool minimizeMain = false)
@@ -3381,181 +3487,44 @@ public sealed class MainForm : Form
 
     private void BuildDesktopPage()
     {
-        var page = CreatePage("桌面收纳");
-        var actions = CreateActionBar();
-        var refreshButton = CreateButton("刷新桌面");
-        var addButton = CreateButton("新建分类");
-        var deleteButton = CreateButton("删除分类");
-        var renameButton = CreateButton("重命名");
-        var toggleButton = CreateButton("折叠/展开");
-        var organizeButton = CreateButton("自动整理");
-        var pinButton = CreateButton("添加到桌面");
-        actions.Controls.AddRange(new Control[] { refreshButton, addButton, deleteButton, renameButton, toggleButton, organizeButton, pinButton });
-        page.Controls.Add(actions, 0, 1);
-
-        var grid = new TableLayoutPanel
+        var canvas = new DesktopPageCanvas(_config, GetDesktopEntries)
         {
             Dock = DockStyle.Fill,
-            ColumnCount = 3,
-            RowCount = 1
+            BackColor = BackColorMain
         };
-        grid.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 28));
-        grid.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 36));
-        grid.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 36));
-
-        var categoryList = CreateListBox();
-        var desktopList = CreateDesktopEntryGrid();
-        var itemList = CreateDesktopEntryGrid();
-        categoryList.AllowDrop = true;
-        itemList.AllowDrop = true;
-        desktopList.MultiSelect = true;
-        itemList.MultiSelect = true;
-
-        var addToCategoryButton = CreateButton("归入分类");
-        var removeFromCategoryButton = CreateButton("移出分类");
-        var openButton = CreateButton("打开");
-
-        grid.Controls.Add(CreateGroup("分类", categoryList), 0, 0);
-        grid.Controls.Add(CreateGroup("桌面项目", desktopList, addToCategoryButton), 1, 0);
-        grid.Controls.Add(CreateGroup("分类内容", itemList, openButton, removeFromCategoryButton), 2, 0);
-        page.Controls.Add(grid, 0, 2);
-        addToCategoryButton.Enabled = false;
-        removeFromCategoryButton.Enabled = false;
-        openButton.Enabled = false;
-
-        void RefreshCategories()
-        {
-            var selectedCategory = categoryList.SelectedItem as DeskCategory;
-            var selectedCategoryName = selectedCategory?.Name;
-            categoryList.Items.Clear();
-            foreach (var category in _config.DesktopCategories)
-            {
-                categoryList.Items.Add(category);
-            }
-
-            if (selectedCategory is not null && _config.DesktopCategories.Contains(selectedCategory))
-            {
-                categoryList.SelectedItem = selectedCategory;
-            }
-            else if (!string.IsNullOrWhiteSpace(selectedCategoryName))
-            {
-                foreach (var item in categoryList.Items)
-                {
-                    if (item is DeskCategory category && string.Equals(category.Name, selectedCategoryName, StringComparison.Ordinal))
-                    {
-                        categoryList.SelectedItem = category;
-                        break;
-                    }
-                }
-            }
-
-            if (categoryList.Items.Count > 0 && categoryList.SelectedIndex < 0)
-            {
-                categoryList.SelectedIndex = 0;
-            }
-        }
-
-        void RefreshDesktopItems()
-        {
-            var selectedPaths = SelectedDesktopEntries(desktopList).Select(entry => entry.Path).ToArray();
-            var assigned = _config.DesktopCategories
-                .SelectMany(c => c.ItemPaths)
-                .Where(p => !string.IsNullOrWhiteSpace(p))
-                .ToHashSet(StringComparer.OrdinalIgnoreCase);
-            var assignedNames = assigned
-                .Select(Path.GetFileName)
-                .Where(name => !string.IsNullOrWhiteSpace(name))
-                .ToHashSet(StringComparer.OrdinalIgnoreCase);
-
-            desktopList.Items.Clear();
-            foreach (var path in GetDesktopEntries().Where(path => !assigned.Contains(path) && !assignedNames.Contains(Path.GetFileName(path))))
-            {
-                AddDesktopGridItem(desktopList, path);
-            }
-            RestoreDesktopEntrySelection(desktopList, selectedPaths);
-        }
-
-        void RefreshCategoryItems()
-        {
-            var selectedPaths = SelectedDesktopEntries(itemList).Select(entry => entry.Path).ToArray();
-            itemList.Items.Clear();
-            if (categoryList.SelectedItem is not DeskCategory category)
-            {
-                return;
-            }
-
-            if (category.IsCollapsed)
-            {
-                itemList.Items.Add(new ListViewItem($"已折叠：{category.ItemPaths.Count} 项"));
-                return;
-            }
-
-            foreach (var path in category.ItemPaths.ToArray())
-            {
-                if (File.Exists(path) || Directory.Exists(path))
-                {
-                    AddDesktopGridItem(itemList, path);
-                }
-                else
-                {
-                    category.ItemPaths.Remove(path);
-                }
-            }
-
-            _store.SaveConfig(_config);
-            RestoreDesktopEntrySelection(itemList, selectedPaths);
-        }
 
         void RefreshAll()
         {
             RemoveMissingDesktopCategoryItems();
             DesktopOrganizerStorage.RemoveDesktopDuplicateOrganizerReferences(_config);
             _store.SaveConfig(_config);
-            RefreshCategories();
-            RefreshDesktopItems();
-            RefreshCategoryItems();
-            UpdateDesktopButtons();
+            canvas.RefreshData();
         }
 
-        DeskCategory? CurrentCategory() => categoryList.SelectedItem as DeskCategory;
-
-        void UpdateDesktopButtons()
+        void AddPathsToCategory(DeskCategory category, IEnumerable<string> paths)
         {
-            addToCategoryButton.Enabled = SelectedDesktopEntry(desktopList) is not null && CurrentCategory() is not null;
-            openButton.Enabled = SelectedDesktopEntry(itemList) is not null;
-            removeFromCategoryButton.Enabled = SelectedDesktopEntries(itemList).Any();
-        }
-
-        void AddPathToCurrentCategory(string path)
-        {
-            var category = CurrentCategory();
-            if (category is null || string.IsNullOrWhiteSpace(path))
+            foreach (var path in paths.Where(path => !string.IsNullOrWhiteSpace(path)).Distinct(StringComparer.OrdinalIgnoreCase))
             {
-                return;
+                var target = DesktopOrganizerStorage.MoveIntoCategory(_store, category, path);
+                if (target is null)
+                {
+                    continue;
+                }
+
+                DesktopOrganizerStorage.RemoveOrganizerReferences(_config, path, target);
+                if (!category.ItemPaths.Contains(target, StringComparer.OrdinalIgnoreCase))
+                {
+                    category.ItemPaths.Add(target);
+                }
             }
 
-            var target = DesktopOrganizerStorage.MoveIntoCategory(_store, category, path);
-            if (target is null)
-            {
-                return;
-            }
-
-            DesktopOrganizerStorage.RemoveOrganizerReferences(_config, path, target);
-
-            category.ItemPaths.Add(target);
             _store.SaveConfig(_config);
             RefreshAll();
+            _desktopOrganizerWidget?.RefreshWidget();
         }
 
-        categoryList.SelectedIndexChanged += (_, _) =>
-        {
-            RefreshCategoryItems();
-            UpdateDesktopButtons();
-        };
-        desktopList.SelectedIndexChanged += (_, _) => UpdateDesktopButtons();
-        itemList.SelectedIndexChanged += (_, _) => UpdateDesktopButtons();
-        refreshButton.Click += (_, _) => RefreshAll();
-        addButton.Click += (_, _) =>
+        canvas.RefreshRequested += RefreshAll;
+        canvas.AddCategoryRequested += () =>
         {
             var name = Prompt("新建分类", "分类名称");
             if (string.IsNullOrWhiteSpace(name))
@@ -3567,14 +3536,14 @@ public sealed class MainForm : Form
             _store.SaveConfig(_config);
             RefreshAll();
         };
-        renameButton.Click += (_, _) =>
+        canvas.DeleteCategoryRequested += category =>
         {
-            var category = CurrentCategory();
-            if (category is null)
-            {
-                return;
-            }
-
+            _config.DesktopCategories.Remove(category);
+            _store.SaveConfig(_config);
+            RefreshAll();
+        };
+        canvas.RenameCategoryRequested += category =>
+        {
             var name = Prompt("重命名分类", "分类名称", category.Name);
             if (string.IsNullOrWhiteSpace(name))
             {
@@ -3585,264 +3554,44 @@ public sealed class MainForm : Form
             _store.SaveConfig(_config);
             RefreshAll();
         };
-        deleteButton.Click += (_, _) =>
+        canvas.ToggleCategoryRequested += category =>
         {
-            var category = CurrentCategory();
-            if (category is null)
-            {
-                return;
-            }
-
-            _config.DesktopCategories.Remove(category);
-            _store.SaveConfig(_config);
-            RefreshAll();
-        };
-        toggleButton.Click += (_, _) =>
-        {
-            var category = CurrentCategory();
-            if (category is null)
-            {
-                return;
-            }
-
             category.IsCollapsed = !category.IsCollapsed;
             _store.SaveConfig(_config);
             RefreshAll();
         };
-        addToCategoryButton.Click += (_, _) =>
-        {
-            if (SelectedDesktopEntry(desktopList) is { } entry)
-            {
-                AddPathToCurrentCategory(entry.Path);
-            }
-        };
-        removeFromCategoryButton.Click += (_, _) =>
-        {
-            var category = CurrentCategory();
-            if (category is null || itemList.SelectedItems.Count == 0)
-            {
-                return;
-            }
-
-            var selected = SelectedDesktopEntries(itemList).ToArray();
-            foreach (var entry in selected)
-            {
-                DesktopOrganizerStorage.MoveToDesktopAndRemove(_config, entry.Path);
-            }
-
-            _store.SaveConfig(_config);
-            RefreshAll();
-        };
-        openButton.Click += (_, _) =>
-        {
-            if (SelectedDesktopEntry(itemList) is { } entry)
-            {
-                OpenPath(entry.Path);
-            }
-        };
-        organizeButton.Click += (_, _) =>
+        canvas.OrganizeRequested += () =>
         {
             RemoveMissingDesktopCategoryItems();
             _store.SaveConfig(_config);
             RefreshAll();
         };
-        pinButton.Click += (_, _) =>
+        canvas.PinRequested += () => ShowDesktopOrganizerWidget();
+        canvas.AddToCategoryRequested += AddPathsToCategory;
+        canvas.RemoveFromCategoryRequested += paths =>
         {
-            ShowDesktopOrganizerWidget();
+            foreach (var path in paths)
+            {
+                DesktopOrganizerStorage.MoveToDesktopAndRemove(_config, path);
+            }
+
+            _store.SaveConfig(_config);
+            RefreshAll();
+            _desktopOrganizerWidget?.RefreshWidget();
         };
-
-        DesktopEntry? pendingDesktopDrag = null;
-        Point pendingDesktopDragStart = Point.Empty;
-        DesktopEntry? pendingItemDrag = null;
-        Point pendingItemDragStart = Point.Empty;
-        string? activeDesktopPageDragPath = null;
-        bool handledDesktopPageDrop = false;
-
-        DataObject CreateDesktopEntryDragData(string[] paths, Action? launcherCopyHandled = null)
-        {
-            var data = new DataObject();
-            data.SetData(DataFormats.Text, paths.FirstOrDefault() ?? "");
-            data.SetData(DataFormats.FileDrop, paths);
-            if (launcherCopyHandled is not null)
-            {
-                data.SetData(DustDeskDragData.LauncherCopyHandledFormat, launcherCopyHandled);
-            }
-
-            return data;
-        }
-
-        DragDropEffects DoDesktopEntryDrag(Control source, string[] paths, Action? launcherCopyHandled = null)
-        {
-            using var preview = new DragPreviewForm(paths);
-            void MovePreview() => preview.MoveToCursor(Cursor.Position);
-            GiveFeedbackEventHandler giveFeedback = (_, e) =>
-            {
-                e.UseDefaultCursors = true;
-                MovePreview();
-            };
-            QueryContinueDragEventHandler queryContinue = (_, _) => MovePreview();
-
-            try
-            {
-                preview.Show();
-                MovePreview();
-                source.GiveFeedback += giveFeedback;
-                source.QueryContinueDrag += queryContinue;
-                return source.DoDragDrop(CreateDesktopEntryDragData(paths, launcherCopyHandled), DragDropEffects.Move | DragDropEffects.Copy);
-            }
-            finally
-            {
-                source.GiveFeedback -= giveFeedback;
-                source.QueryContinueDrag -= queryContinue;
-                preview.Close();
-            }
-        }
-
-        desktopList.MouseDown += (_, e) =>
-        {
-            if (e.Button != MouseButtons.Left)
-            {
-                return;
-            }
-
-            pendingDesktopDrag = desktopList.GetItemAt(e.X, e.Y)?.Tag as DesktopEntry;
-            pendingDesktopDragStart = e.Location;
-        };
-        desktopList.MouseMove += (_, e) =>
-        {
-            if (pendingDesktopDrag is null || e.Button != MouseButtons.Left)
-            {
-                return;
-            }
-
-            if (Math.Abs(e.X - pendingDesktopDragStart.X) >= SystemInformation.DragSize.Width / 2
-                || Math.Abs(e.Y - pendingDesktopDragStart.Y) >= SystemInformation.DragSize.Height / 2)
-            {
-                var entry = pendingDesktopDrag;
-                var paths = SelectedDesktopEntries(desktopList).Select(item => item.Path).DefaultIfEmpty(entry.Path).Distinct(StringComparer.OrdinalIgnoreCase).ToArray();
-                pendingDesktopDrag = null;
-                activeDesktopPageDragPath = entry.Path;
-                handledDesktopPageDrop = false;
-                DoDesktopEntryDrag(desktopList, paths);
-                activeDesktopPageDragPath = null;
-            }
-        };
-        desktopList.MouseUp += (_, _) => pendingDesktopDrag = null;
-        itemList.MouseDown += (_, e) =>
-        {
-            if (e.Button != MouseButtons.Left)
-            {
-                return;
-            }
-
-            pendingItemDrag = itemList.GetItemAt(e.X, e.Y)?.Tag as DesktopEntry;
-            pendingItemDragStart = e.Location;
-        };
-        itemList.MouseMove += (_, e) =>
-        {
-            if (pendingItemDrag is null || e.Button != MouseButtons.Left)
-            {
-                return;
-            }
-
-            if (Math.Abs(e.X - pendingItemDragStart.X) >= SystemInformation.DragSize.Width / 2
-                || Math.Abs(e.Y - pendingItemDragStart.Y) >= SystemInformation.DragSize.Height / 2)
-            {
-                var entry = pendingItemDrag;
-                var paths = SelectedDesktopEntries(itemList).Select(item => item.Path).DefaultIfEmpty(entry.Path).Distinct(StringComparer.OrdinalIgnoreCase).ToArray();
-                pendingItemDrag = null;
-                activeDesktopPageDragPath = entry.Path;
-                handledDesktopPageDrop = false;
-                var effect = DoDesktopEntryDrag(itemList, paths, () => handledDesktopPageDrop = true);
-                if (effect != DragDropEffects.None && !handledDesktopPageDrop)
-                {
-                    foreach (var path in paths)
-                    {
-                        DesktopOrganizerStorage.MoveToDesktopAndRemove(_config, path);
-                    }
-
-                    _store.SaveConfig(_config);
-                    RefreshAll();
-                    _desktopOrganizerWidget?.RefreshWidget();
-                }
-
-                activeDesktopPageDragPath = null;
-            }
-        };
-        itemList.MouseUp += (_, _) => pendingItemDrag = null;
-        categoryList.DragEnter += (_, e) => SetDragEffect(e);
-        itemList.DragEnter += (_, e) => SetDragEffect(e);
-        categoryList.DragDrop += (_, e) =>
-        {
-            foreach (var path in GetDroppedPaths(e))
-            {
-                if (!string.IsNullOrWhiteSpace(activeDesktopPageDragPath)
-                    && string.Equals(path, activeDesktopPageDragPath, StringComparison.OrdinalIgnoreCase))
-                {
-                    handledDesktopPageDrop = true;
-                }
-
-                AddPathToCurrentCategory(path);
-            }
-        };
-        itemList.DragDrop += (_, e) =>
-        {
-            foreach (var path in GetDroppedPaths(e))
-            {
-                if (!string.IsNullOrWhiteSpace(activeDesktopPageDragPath)
-                    && string.Equals(path, activeDesktopPageDragPath, StringComparison.OrdinalIgnoreCase))
-                {
-                    handledDesktopPageDrop = true;
-                }
-
-                AddPathToCurrentCategory(path);
-            }
-        };
-
+        canvas.OpenRequested += OpenPath;
         RefreshAll();
-        _content.Controls.Add(page);
+        _content.Controls.Add(canvas);
     }
 
     private void BuildTodoPage()
     {
-        var page = CreatePage("今日任务");
-        var actions = CreateActionBar();
-        var addButton = CreateButton("新增");
-        var editButton = CreateButton("编辑");
-        var deleteButton = CreateButton("删除");
-        actions.Controls.AddRange(new Control[] { addButton, editButton, deleteButton });
-        page.Controls.Add(actions, 0, 1);
-
-        var list = new CheckedListBox
+        var canvas = new TodoPageCanvas(_todos)
         {
             Dock = DockStyle.Fill,
-            CheckOnClick = true,
-            BorderStyle = BorderStyle.None,
-            Font = new Font(Font.FontFamily, 11F),
-            BackColor = PanelColor,
-            ForeColor = TextColorMain,
-            HorizontalScrollbar = true
+            BackColor = BackColorMain
         };
-        var detailTip = new ToolTip
-        {
-            AutomaticDelay = 250,
-            ReshowDelay = 100,
-            AutoPopDelay = 8000
-        };
-        page.Controls.Add(CreateGroup("任务", list), 0, 2);
-
-        TodoItem? CurrentItem() => list.SelectedIndex >= 0 ? _todos.Items.ElementAtOrDefault(list.SelectedIndex) : null;
-
-        void RefreshTodos()
-        {
-            list.Items.Clear();
-            foreach (var item in _todos.Items)
-            {
-                list.Items.Add(FormatTodoListDisplay(item), item.Done);
-            }
-        }
-
-        addButton.Click += (_, _) =>
+        canvas.AddRequested += () =>
         {
             var item = ShowTodoEditor();
             if (item is null)
@@ -3852,16 +3601,10 @@ public sealed class MainForm : Form
 
             _todos.Items.Add(item);
             SaveTodos();
-            RefreshTodos();
+            canvas.RefreshData(selectItem: item);
         };
-        editButton.Click += (_, _) =>
+        canvas.EditRequested += item =>
         {
-            var item = CurrentItem();
-            if (item is null)
-            {
-                return;
-            }
-
             var edited = ShowTodoEditor(item);
             if (edited is null)
             {
@@ -3874,217 +3617,32 @@ public sealed class MainForm : Form
             item.Done = edited.Done;
             item.CreatedAt = edited.CreatedAt;
             SaveTodos();
-            RefreshTodos();
+            canvas.RefreshData(selectItem: item);
         };
-        deleteButton.Click += (_, _) =>
+        canvas.DeleteRequested += item =>
         {
-            var item = CurrentItem();
-            if (item is null)
-            {
-                return;
-            }
-
             _todos.Items.Remove(item);
             SaveTodos();
-            RefreshTodos();
+            canvas.RefreshData();
         };
-        list.ItemCheck += (_, e) =>
+        canvas.DoneChanged += item =>
         {
-            BeginInvoke((Action)(() =>
-            {
-                if (_todos.Items.ElementAtOrDefault(e.Index) is TodoItem item)
-                {
-                    item.Done = e.NewValue == CheckState.Checked;
-                    SaveTodos();
-                }
-            }));
+            SaveTodos();
+            canvas.RefreshData(selectItem: item);
         };
-        list.DoubleClick += (_, _) =>
-        {
-            var item = CurrentItem();
-            if (item is not null)
-            {
-                ShowTodoDetails(item);
-            }
-        };
-        list.MouseMove += (_, e) =>
-        {
-            var index = list.IndexFromPoint(e.Location);
-            if (index >= 0 && _todos.Items.ElementAtOrDefault(index) is TodoItem item && !string.IsNullOrWhiteSpace(item.Note))
-            {
-                detailTip.SetToolTip(list, item.Note);
-                list.Cursor = Cursors.Hand;
-            }
-            else
-            {
-                detailTip.SetToolTip(list, string.Empty);
-                list.Cursor = Cursors.Default;
-            }
-        };
-        list.MouseUp += (_, e) =>
-        {
-            if (e.Button != MouseButtons.Right)
-            {
-                return;
-            }
-
-            var index = list.IndexFromPoint(e.Location);
-            if (index < 0)
-            {
-                return;
-            }
-
-            list.SelectedIndex = index;
-            if (_todos.Items.ElementAtOrDefault(index) is not TodoItem item)
-            {
-                return;
-            }
-
-            var menu = new ContextMenuStrip { ShowImageMargin = false };
-            menu.Items.Add("查看详情", null, (_, _) => ShowTodoDetails(item));
-            menu.Show(list, e.Location);
-        };
-
-        RefreshTodos();
-        _content.Controls.Add(page);
+        canvas.DetailRequested += ShowTodoDetails;
+        canvas.RefreshData();
+        _content.Controls.Add(canvas);
     }
     private void BuildNotePage()
     {
         EnsureNoteItem();
 
-        var page = CreatePage("便签");
-        var actions = CreateActionBar();
-        var addButton = CreateButton("添加便签");
-        var deleteButton = CreateButton("删除便签");
-        var renameButton = CreateButton("重命名");
-        var colorButton = CreateButton("颜色");
-        var transparentColorButton = CreateSecondaryButton("透明颜色");
-        var fontColorButton = CreateButton("字色");
-        var fontSizeDownButton = CreateSecondaryButton("A-");
-        var fontSizeUpButton = CreateButton("A+");
-        var fontBoldButton = CreateButton("加粗");
-        var imageButton = CreateButton("背景图片");
-        var clearImageButton = CreateSecondaryButton("清除背景");
-        var imageOnlyButton = CreateButton("仅显示图片");
-        var pinNoteButton = CreateButton("添加到桌面");
-        actions.Controls.AddRange(new Control[] { addButton, deleteButton, renameButton, colorButton, transparentColorButton, fontColorButton, fontSizeDownButton, fontSizeUpButton, fontBoldButton, imageButton, clearImageButton, imageOnlyButton, pinNoteButton });
-        page.Controls.Add(actions, 0, 1);
-
-        var layout = new TableLayoutPanel
+        var canvas = new NotePageCanvas(_notes)
         {
             Dock = DockStyle.Fill,
-            ColumnCount = 2,
-            RowCount = 1,
-            BackColor = Color.Transparent
+            BackColor = BackColorMain
         };
-        layout.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 280));
-        layout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
-
-        var noteList = CreateListBox();
-        var addFromListButton = CreateButton("添加便签");
-        noteList.DrawMode = DrawMode.OwnerDrawFixed;
-        noteList.ItemHeight = 70;
-        noteList.DrawItem += (_, e) =>
-        {
-            e.DrawBackground();
-            if (e.Index < 0 || e.Index >= noteList.Items.Count || noteList.Items[e.Index] is not NoteItem item)
-            {
-                return;
-            }
-
-            var selected = (e.State & DrawItemState.Selected) == DrawItemState.Selected;
-            using var fill = new SolidBrush(selected ? AccentColor : Color.FromArgb(42, 51, 67));
-            e.Graphics.FillRectangle(fill, e.Bounds);
-            using var swatch = new SolidBrush(Color.FromArgb(item.ColorArgb).A == 0 ? Color.FromArgb(42, 51, 67) : Color.FromArgb(item.ColorArgb));
-            e.Graphics.FillRectangle(swatch, e.Bounds.X + 10, e.Bounds.Y + 12, 9, e.Bounds.Height - 24);
-            TextRenderer.DrawText(e.Graphics, item.Title, new Font(Font.FontFamily, 10F, FontStyle.Bold), new Rectangle(e.Bounds.X + 28, e.Bounds.Y + 10, e.Bounds.Width - 38, 22), Color.White, TextFormatFlags.EndEllipsis);
-            var preview = string.IsNullOrWhiteSpace(item.Text) ? "空白便签" : item.Text.Replace("\r", " ").Replace("\n", " ").Trim();
-            TextRenderer.DrawText(e.Graphics, preview, Font, new Rectangle(e.Bounds.X + 28, e.Bounds.Y + 36, e.Bounds.Width - 38, 22), selected ? Color.FromArgb(218, 230, 255) : TextColorSubtle, TextFormatFlags.EndEllipsis);
-        };
-
-        var editorHost = new NoteEditorPanel
-        {
-            Dock = DockStyle.Fill,
-            Padding = new Padding(16),
-            BackColor = Color.Transparent
-        };
-        var textBox = new NoteTextBox
-        {
-            Dock = DockStyle.Fill,
-            Multiline = true,
-            AcceptsTab = true,
-            ScrollBars = ScrollBars.Vertical,
-            BorderStyle = BorderStyle.None,
-            Font = new Font("Microsoft YaHei UI", 13F),
-            ForeColor = Color.FromArgb(44, 38, 28)
-        };
-        editorHost.Controls.Add(textBox);
-
-        var statusLabel = new Label
-        {
-            Dock = DockStyle.Bottom,
-            Height = 26,
-            ForeColor = TextColorSubtle,
-            TextAlign = ContentAlignment.MiddleLeft
-        };
-        editorHost.Controls.Add(statusLabel);
-
-        layout.Controls.Add(CreateGroup("便签列表", noteList, addFromListButton), 0, 0);
-        layout.Controls.Add(CreateGroup("编辑", editorHost), 1, 0);
-        page.Controls.Add(layout, 0, 2);
-
-        void RefreshNotes(NoteItem? selected = null)
-        {
-            noteList.Items.Clear();
-            foreach (var item in _notes.Items)
-            {
-                noteList.Items.Add(item);
-            }
-
-            noteList.SelectedItem = selected ?? noteList.SelectedItem ?? _notes.Items.FirstOrDefault();
-            RefreshEditor();
-        }
-
-        void RefreshEditor()
-        {
-            if (noteList.SelectedItem is not NoteItem item)
-            {
-                textBox.Enabled = false;
-                textBox.Text = "";
-                statusLabel.Text = "无便签";
-                return;
-            }
-
-            textBox.Enabled = true;
-            _activeNoteItem = item;
-            _activeNoteBox = textBox;
-            textBox.TextChanged -= NoteTextChanged;
-            textBox.Text = item.Text;
-            var noteColor = Color.FromArgb(item.ColorArgb);
-            textBox.BackColor = noteColor.A == 0 ? Color.FromArgb(28, 38, 54) : noteColor;
-            item.FontColorArgb = NoteStyle.NormalizeTextColorArgb(item.FontColorArgb);
-            textBox.ForeColor = item.ImageOnly ? textBox.BackColor : NoteStyle.TextColor(item);
-            textBox.Font = new Font("Microsoft YaHei UI", Math.Clamp(item.FontSize, 8F, 42F), item.FontBold ? FontStyle.Bold : FontStyle.Regular);
-            textBox.ScrollBars = item.ImageOnly ? ScrollBars.None : ScrollBars.Vertical;
-            textBox.ReadOnly = item.ImageOnly;
-            textBox.SetBackground(item.BackgroundImagePath, item.ImageOnly);
-            editorHost.SetBackground(null);
-            imageOnlyButton.Enabled = !string.IsNullOrWhiteSpace(item.BackgroundImagePath);
-            imageOnlyButton.BackColor = item.ImageOnly ? Color.FromArgb(26, 135, 84) : AccentColor;
-            fontBoldButton.BackColor = item.FontBold ? Color.FromArgb(26, 135, 84) : AccentColor;
-            statusLabel.Text = string.IsNullOrWhiteSpace(item.BackgroundImagePath)
-                ? $"自动保存 · {item.UpdatedAt:HH:mm:ss}"
-                : $"自动保存 · 图片背景 · {item.UpdatedAt:HH:mm:ss}";
-            textBox.TextChanged += NoteTextChanged;
-        }
-
-        void NoteTextChanged(object? sender, EventArgs e)
-        {
-            statusLabel.Text = "保存中";
-            _noteSaveTimer?.Stop();
-            _noteSaveTimer?.Start();
-            noteList.Invalidate();
-        }
 
         _noteSaveTimer = new System.Windows.Forms.Timer { Interval = 700 };
         _noteSaveTimer.Tick += (_, _) =>
@@ -4095,34 +3653,33 @@ public sealed class MainForm : Form
             {
                 RefreshDesktopNoteWidgets(_activeNoteItem);
             }
-            statusLabel.Text = $"已保存 {DateTime.Now:HH:mm:ss}";
-            noteList.Invalidate();
+            canvas.SetStatus($"已保存 {DateTime.Now:HH:mm:ss}");
+            canvas.RefreshData(_activeNoteItem);
         };
 
-        noteList.SelectedIndexChanged += (_, _) =>
+        canvas.SaveCurrentRequested += SaveActiveNote;
+        canvas.ActiveEditorChanged += (item, editor) =>
         {
-            SaveActiveNote();
-            RefreshEditor();
+            _activeNoteItem = item;
+            _activeNoteBox = editor;
         };
-        void AddNote()
+        canvas.NoteTextChanged += () =>
+        {
+            canvas.SetStatus("保存中");
+            _noteSaveTimer?.Stop();
+            _noteSaveTimer?.Start();
+        };
+        canvas.AddRequested += () =>
         {
             SaveActiveNote();
             var item = new NoteItem { Title = $"便签 {_notes.Items.Count + 1}" };
             _notes.Items.Add(item);
             _store.SaveNotes(_notes);
-            RefreshNotes(item);
-        }
-
-        addButton.Click += (_, _) => AddNote();
-        addFromListButton.Click += (_, _) => AddNote();
-        deleteButton.Click += (_, _) =>
+            canvas.RefreshData(item);
+        };
+        canvas.DeleteRequested += item =>
         {
             SaveActiveNote();
-            if (noteList.SelectedItem is not NoteItem item)
-            {
-                return;
-            }
-
             _notes.Items.Remove(item);
             if (_notes.Items.Count == 0)
             {
@@ -4130,16 +3687,11 @@ public sealed class MainForm : Form
             }
 
             _store.SaveNotes(_notes);
-            RefreshNotes(_notes.Items.FirstOrDefault());
+            canvas.RefreshData(_notes.Items.FirstOrDefault());
         };
-        renameButton.Click += (_, _) =>
+        canvas.RenameRequested += item =>
         {
             SaveActiveNote();
-            if (noteList.SelectedItem is not NoteItem item)
-            {
-                return;
-            }
-
             var title = Prompt("重命名便签", "便签名称", item.Title);
             if (string.IsNullOrWhiteSpace(title))
             {
@@ -4150,16 +3702,11 @@ public sealed class MainForm : Form
             item.UpdatedAt = DateTime.Now;
             _store.SaveNotes(_notes);
             RefreshDesktopNoteWidgets(item);
-            RefreshNotes(item);
+            canvas.RefreshData(item);
         };
-        colorButton.Click += (_, _) =>
+        canvas.ColorRequested += item =>
         {
             SaveActiveNote();
-            if (noteList.SelectedItem is not NoteItem item)
-            {
-                return;
-            }
-
             using var dialog = new ColorDialog
             {
                 Color = Color.FromArgb(item.ColorArgb),
@@ -4174,30 +3721,20 @@ public sealed class MainForm : Form
             item.UpdatedAt = DateTime.Now;
             _store.SaveNotes(_notes);
             RefreshDesktopNoteWidgets(item);
-            RefreshNotes(item);
+            canvas.RefreshData(item);
         };
-        transparentColorButton.Click += (_, _) =>
+        canvas.TransparentColorRequested += item =>
         {
             SaveActiveNote();
-            if (noteList.SelectedItem is not NoteItem item)
-            {
-                return;
-            }
-
             item.ColorArgb = Color.Transparent.ToArgb();
             item.UpdatedAt = DateTime.Now;
             _store.SaveNotes(_notes);
             RefreshDesktopNoteWidgets(item);
-            RefreshNotes(item);
+            canvas.RefreshData(item);
         };
-        fontColorButton.Click += (_, _) =>
+        canvas.FontColorRequested += item =>
         {
             SaveActiveNote();
-            if (noteList.SelectedItem is not NoteItem item)
-            {
-                return;
-            }
-
             using var dialog = new ColorDialog
             {
                 Color = Color.FromArgb(item.FontColorArgb),
@@ -4212,46 +3749,29 @@ public sealed class MainForm : Form
             item.UpdatedAt = DateTime.Now;
             _store.SaveNotes(_notes);
             RefreshDesktopNoteWidgets(item);
-            RefreshNotes(item);
+            canvas.RefreshData(item);
         };
-        fontSizeDownButton.Click += (_, _) => ChangeNoteFontSize(-1F);
-        fontSizeUpButton.Click += (_, _) => ChangeNoteFontSize(1F);
-        fontBoldButton.Click += (_, _) =>
+        canvas.FontSizeRequested += (item, delta) =>
         {
             SaveActiveNote();
-            if (noteList.SelectedItem is not NoteItem item)
-            {
-                return;
-            }
-
-            item.FontBold = !item.FontBold;
-            item.UpdatedAt = DateTime.Now;
-            _store.SaveNotes(_notes);
-            RefreshDesktopNoteWidgets(item);
-            RefreshNotes(item);
-        };
-        void ChangeNoteFontSize(float delta)
-        {
-            SaveActiveNote();
-            if (noteList.SelectedItem is not NoteItem item)
-            {
-                return;
-            }
-
             item.FontSize = Math.Clamp(item.FontSize + delta, 8F, 42F);
             item.UpdatedAt = DateTime.Now;
             _store.SaveNotes(_notes);
             RefreshDesktopNoteWidgets(item);
-            RefreshNotes(item);
-        }
-        imageButton.Click += (_, _) =>
+            canvas.RefreshData(item);
+        };
+        canvas.BoldRequested += item =>
         {
             SaveActiveNote();
-            if (noteList.SelectedItem is not NoteItem item)
-            {
-                return;
-            }
-
+            item.FontBold = !item.FontBold;
+            item.UpdatedAt = DateTime.Now;
+            _store.SaveNotes(_notes);
+            RefreshDesktopNoteWidgets(item);
+            canvas.RefreshData(item);
+        };
+        canvas.ImageRequested += item =>
+        {
+            SaveActiveNote();
             using var dialog = new OpenFileDialog
             {
                 Title = "选择便签背景图片",
@@ -4267,30 +3787,20 @@ public sealed class MainForm : Form
             item.UpdatedAt = DateTime.Now;
             _store.SaveNotes(_notes);
             RefreshDesktopNoteWidgets(item);
-            RefreshNotes(item);
+            canvas.RefreshData(item);
         };
-        imageOnlyButton.Click += (_, _) =>
+        canvas.ImageOnlyRequested += item =>
         {
             SaveActiveNote();
-            if (noteList.SelectedItem is not NoteItem item || string.IsNullOrWhiteSpace(item.BackgroundImagePath))
-            {
-                return;
-            }
-
             item.ImageOnly = !item.ImageOnly;
             item.UpdatedAt = DateTime.Now;
             _store.SaveNotes(_notes);
             RefreshDesktopNoteWidgets(item);
-            RefreshNotes(item);
+            canvas.RefreshData(item);
         };
-        pinNoteButton.Click += (_, _) =>
+        canvas.PinRequested += item =>
         {
             SaveActiveNote();
-            if (noteList.SelectedItem is not NoteItem item)
-            {
-                return;
-            }
-
             var existing = _desktopNoteWidgets.FirstOrDefault(widget => !widget.IsDisposed && widget.Displays(item));
             if (existing is not null)
             {
@@ -4302,372 +3812,73 @@ public sealed class MainForm : Form
             _desktopNoteWidgets.Add(widget);
             widget.ShowAsDesktopWidget(EnsureDesktopNotePlacement(item));
         };
-        clearImageButton.Click += (_, _) =>
+        canvas.ClearImageRequested += item =>
         {
             SaveActiveNote();
-            if (noteList.SelectedItem is not NoteItem item)
-            {
-                return;
-            }
-
             item.BackgroundImagePath = null;
             item.ImageOnly = false;
             item.UpdatedAt = DateTime.Now;
             _store.SaveNotes(_notes);
             RefreshDesktopNoteWidgets(item);
-            RefreshNotes(item);
+            canvas.RefreshData(item);
         };
 
         var initialSelection = _pendingNoteSelection is not null && _notes.Items.Contains(_pendingNoteSelection)
             ? _pendingNoteSelection
             : _notes.Items.FirstOrDefault();
         _pendingNoteSelection = null;
-        RefreshNotes(initialSelection);
-        _content.Controls.Add(page);
+        canvas.RefreshData(initialSelection);
+        _content.Controls.Add(canvas);
     }
 
     private void BuildProjectPage()
     {
-        var page = CreatePage("项目管理");
-        var actions = CreateActionBar();
-        var addProjectButton = CreateButton("新建项目");
-        var renameProjectButton = CreateButton("重命名项目");
-        var deleteProjectButton = CreateButton("删除项目");
-        var pathProjectButton = CreateButton("添加项目路径");
-        var pinProjectButton = CreateButton("添加到桌面");
-        actions.Controls.AddRange(new Control[] { addProjectButton, renameProjectButton, deleteProjectButton, pathProjectButton, pinProjectButton });
-        page.Controls.Add(actions, 0, 1);
-
-        var grid = new TableLayoutPanel
+        var canvas = new ProjectPageCanvas(_projects)
         {
             Dock = DockStyle.Fill,
-            ColumnCount = 3,
-            RowCount = 1
+            BackColor = BackColorMain
         };
-        grid.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 210));
-        grid.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 56));
-        grid.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 44));
 
-        var projectList = CreateListBox();
-        var itemList = CreateListBox();
-        var subItemList = new CheckedListBox
+        void SaveAndRefresh(ProjectBoard? project = null, ProjectItem? item = null, ProjectSubItem? subItem = null)
         {
-            Dock = DockStyle.Fill,
-            CheckOnClick = false,
-            BorderStyle = BorderStyle.None,
-            Font = new Font(Font.FontFamily, 9.5F),
-            BackColor = PanelColor,
-            ForeColor = TextColorMain,
-            HorizontalScrollbar = true
-        };
-        var refreshingSubItems = false;
-        ConfigureProjectList(projectList);
-        ConfigureProjectItemList(itemList);
-        ConfigureProjectSubItemList(subItemList);
-        ConfigureProjectListMenu(projectList, RefreshProjects, RefreshDesktopProjectWidget);
-
-        grid.Controls.Add(CreateGroup("项目", projectList), 0, 0);
-        grid.Controls.Add(CreateProjectItemsGroup(itemList), 1, 0);
-        grid.Controls.Add(CreateProjectSubItemsGroup(subItemList), 2, 0);
-        page.Controls.Add(grid, 0, 2);
-
-        Panel CreateProjectItemsGroup(ListBox list)
-        {
-            var addButton = CreateButton("新增");
-            var editButton = CreateButton("编辑");
-            var deleteButton = CreateButton("删除");
-            var pathButton = CreateButton("添加路径");
-            var group = CreateGroup("项目阶段", list, addButton, editButton, deleteButton, pathButton);
-
-            addButton.Click += (_, _) => AddProjectItem();
-            editButton.Click += (_, _) => EditProjectItem(list);
-            deleteButton.Click += (_, _) => DeleteProjectItem(list);
-            pathButton.Click += (_, _) => SetProjectItemPath(list);
-            ConfigureProjectItemMenu(list, RefreshItems, RefreshDesktopProjectWidget);
-            return group;
-        }
-
-        Panel CreateProjectSubItemsGroup(CheckedListBox list)
-        {
-            var addButton = CreateButton("新增");
-            var editButton = CreateButton("编辑");
-            var deleteButton = CreateButton("删除");
-            var pathButton = CreateButton("添加文件");
-            var group = CreateGroup("文件或事件预设", list, addButton, editButton, deleteButton, pathButton);
-
-            addButton.Click += (_, _) => AddProjectSubItem();
-            editButton.Click += (_, _) => EditProjectSubItem(list);
-            deleteButton.Click += (_, _) => DeleteProjectSubItem(list);
-            pathButton.Click += (_, _) => SetProjectSubItemPath(list);
-            return group;
-        }
-
-        ProjectBoard? CurrentProject() => projectList.SelectedItem as ProjectBoard;
-        ProjectItem? CurrentProjectItem() => itemList.SelectedItem as ProjectItem;
-
-        void RefreshProjects()
-        {
-            projectList.Items.Clear();
-            foreach (var project in _projects.Projects)
-            {
-                projectList.Items.Add(project);
-            }
-
-            if (projectList.Items.Count > 0 && projectList.SelectedIndex < 0)
-            {
-                projectList.SelectedIndex = 0;
-            }
-        }
-
-        void RefreshItems()
-        {
-            var selected = itemList.SelectedItem as ProjectItem;
-            itemList.Items.Clear();
-
-            var project = CurrentProject();
-            if (project is null)
-            {
-                RefreshSubItems();
-                return;
-            }
-
-            foreach (var item in project.Items)
-            {
-                itemList.Items.Add(item);
-            }
-
-            if (selected is not null && project.Items.Contains(selected))
-            {
-                itemList.SelectedItem = selected;
-            }
-            else if (itemList.Items.Count > 0 && itemList.SelectedIndex < 0)
-            {
-                itemList.SelectedIndex = 0;
-            }
-
-            RefreshSubItems();
-        }
-
-        void RefreshSubItems()
-        {
-            refreshingSubItems = true;
-            try
-            {
-                subItemList.Items.Clear();
-                var item = CurrentProjectItem();
-                if (item is null)
-                {
-                    return;
-                }
-
-                foreach (var subItem in item.SubItems)
-                {
-                    subItemList.Items.Add(subItem, subItem.Done);
-                }
-            }
-            finally
-            {
-                refreshingSubItems = false;
-            }
-        }
-
-        void AddProjectItem()
-        {
-            var project = CurrentProject();
-            if (project is null)
-            {
-                return;
-            }
-
-            var input = ShowProjectItemDialog("新增阶段", ProjectStatus.Todo);
-            if (input is null)
-            {
-                return;
-            }
-
-            project.Items.Add(new ProjectItem
-            {
-                Title = input.Value.Title,
-                Status = ProjectStatus.Todo,
-                StartDate = input.Value.StartDate,
-                EndDate = input.Value.EndDate,
-                ProgressPercent = -1
-            });
             _store.SaveProjects(_projects);
-            RefreshItems();
+            canvas.RefreshData(project, item, subItem);
             RefreshDesktopProjectWidget();
         }
 
-        void EditProjectItem(ListBox list)
+        canvas.AddProjectRequested += () =>
         {
-            if (list.SelectedItem is not ProjectItem item)
-            {
-                return;
-            }
-
-            var input = ShowProjectItemDialog("编辑阶段", item.Status, item);
-            if (input is null)
-            {
-                return;
-            }
-
-            item.Title = input.Value.Title;
-            item.StartDate = input.Value.StartDate;
-            item.EndDate = input.Value.EndDate;
-            item.ProgressPercent = -1;
-            _store.SaveProjects(_projects);
-            RefreshItems();
-            RefreshDesktopProjectWidget();
-        }
-
-        void DeleteProjectItem(ListBox list)
-        {
-            var project = CurrentProject();
-            if (project is null || list.SelectedItem is not ProjectItem item)
-            {
-                return;
-            }
-
-            project.Items.Remove(item);
-            _store.SaveProjects(_projects);
-            RefreshItems();
-            RefreshDesktopProjectWidget();
-        }
-
-        void SetProjectItemPath(ListBox list)
-        {
-            if (list.SelectedItem is not ProjectItem item)
-            {
-                return;
-            }
-
-            var path = ChooseProjectPath(item.ProjectPath);
-            if (string.IsNullOrWhiteSpace(path))
-            {
-                return;
-            }
-
-            item.ProjectPath = path;
-            _store.SaveProjects(_projects);
-            RefreshItems();
-            RefreshDesktopProjectWidget();
-        }
-
-        void AddProjectSubItem()
-        {
-            var item = CurrentProjectItem();
-            if (item is null)
-            {
-                return;
-            }
-
-            var name = Prompt("新增预设", "名称");
+            var name = Prompt("新建项目", "项目名称");
             if (string.IsNullOrWhiteSpace(name))
             {
                 return;
             }
 
-            item.SubItems.Add(new ProjectSubItem { Title = name.Trim() });
-            _store.SaveProjects(_projects);
-            RefreshItems();
-            RefreshDesktopProjectWidget();
-        }
-
-        void EditProjectSubItem(CheckedListBox list)
+            var project = new ProjectBoard { Name = name.Trim() };
+            _projects.Projects.Add(project);
+            SaveAndRefresh(project);
+        };
+        canvas.RenameProjectRequested += project =>
         {
-            if (list.SelectedItem is not ProjectSubItem subItem)
-            {
-                return;
-            }
-
-            var name = Prompt("编辑预设", "名称", subItem.Title);
+            var name = Prompt("重命名项目", "项目名称", project.Name);
             if (string.IsNullOrWhiteSpace(name))
             {
                 return;
             }
 
-            subItem.Title = name.Trim();
-            _store.SaveProjects(_projects);
-            RefreshSubItems();
-            RefreshDesktopProjectWidget();
-        }
-
-        void DeleteProjectSubItem(CheckedListBox list)
-        {
-            var item = CurrentProjectItem();
-            if (item is null || list.SelectedItem is not ProjectSubItem subItem)
-            {
-                return;
-            }
-
-            item.SubItems.Remove(subItem);
-            _store.SaveProjects(_projects);
-            RefreshItems();
-            RefreshDesktopProjectWidget();
-        }
-
-        void SetProjectSubItemPath(CheckedListBox list)
-        {
-            if (list.SelectedItem is not ProjectSubItem subItem)
-            {
-                return;
-            }
-
-            var path = ChooseProjectFilePath(subItem.FilePath);
-            if (string.IsNullOrWhiteSpace(path))
-            {
-                return;
-            }
-
-            subItem.FilePath = path;
-            _store.SaveProjects(_projects);
-            RefreshItems();
-            RefreshDesktopProjectWidget();
-        }
-
-        projectList.SelectedIndexChanged += (_, _) => RefreshItems();
-        itemList.SelectedIndexChanged += (_, _) => RefreshSubItems();
-        subItemList.ItemCheck += (_, e) =>
-        {
-            if (refreshingSubItems || e.Index < 0 || e.Index >= subItemList.Items.Count || subItemList.Items[e.Index] is not ProjectSubItem subItem)
-            {
-                return;
-            }
-
-            subItem.Done = e.NewValue == CheckState.Checked;
-            _store.SaveProjects(_projects);
-            BeginInvoke(new Action(() =>
-            {
-                RefreshItems();
-                RefreshDesktopProjectWidget();
-            }));
+            project.Name = name.Trim();
+            SaveAndRefresh(project);
         };
-        subItemList.MouseDown += (_, e) =>
+        canvas.DeleteProjectRequested += project =>
         {
-            var index = subItemList.IndexFromPoint(e.Location);
-            if (index < 0 || index >= subItemList.Items.Count || subItemList.Items[index] is not ProjectSubItem subItem)
-            {
-                return;
-            }
-
-            subItemList.SelectedIndex = index;
-            var checkRect = new Rectangle(10, index * subItemList.ItemHeight + 13, 22, 22);
-            if (checkRect.Contains(e.Location))
-            {
-                subItemList.SetItemChecked(index, !subItemList.GetItemChecked(index));
-                return;
-            }
-
-            if (!string.IsNullOrWhiteSpace(subItem.FilePath))
-            {
-                OpenPath(subItem.FilePath);
-            }
+            _projects.Projects.Remove(project);
+            SaveAndRefresh();
         };
-        pathProjectButton.Click += (_, _) =>
+        canvas.SetProjectPathRequested += project =>
         {
-            var project = CurrentProject();
-            if (project is null)
+            if (Directory.Exists(project.ProjectPath))
             {
+                OpenPath(project.ProjectPath);
                 return;
             }
 
@@ -4678,63 +3889,117 @@ public sealed class MainForm : Form
             }
 
             project.ProjectPath = path;
-            _store.SaveProjects(_projects);
-            RefreshProjects();
-            RefreshDesktopProjectWidget();
+            SaveAndRefresh(project);
         };
-        pinProjectButton.Click += (_, _) => ShowDesktopProjectWidget();
-        addProjectButton.Click += (_, _) =>
+        canvas.PinProjectRequested += () => ShowDesktopProjectWidget();
+        canvas.AddItemRequested += project =>
         {
-            var name = Prompt("新建项目", "项目名称");
+            var input = ShowProjectItemDialog("新增阶段", ProjectStatus.Todo);
+            if (input is null)
+            {
+                return;
+            }
+
+            var item = new ProjectItem
+            {
+                Title = input.Value.Title,
+                Status = ProjectStatus.Todo,
+                StartDate = input.Value.StartDate,
+                EndDate = input.Value.EndDate,
+                ProgressPercent = -1
+            };
+            project.Items.Add(item);
+            SaveAndRefresh(project, item);
+        };
+        canvas.EditItemRequested += item =>
+        {
+            var input = ShowProjectItemDialog("编辑阶段", item.Status, item);
+            if (input is null)
+            {
+                return;
+            }
+
+            item.Title = input.Value.Title;
+            item.StartDate = input.Value.StartDate;
+            item.EndDate = input.Value.EndDate;
+            item.ProgressPercent = -1;
+            SaveAndRefresh(item: item);
+        };
+        canvas.DeleteItemRequested += (project, item) =>
+        {
+            project.Items.Remove(item);
+            SaveAndRefresh(project);
+        };
+        canvas.SetItemPathRequested += item =>
+        {
+            if (Directory.Exists(item.ProjectPath))
+            {
+                OpenPath(item.ProjectPath);
+                return;
+            }
+
+            var path = ChooseProjectPath(item.ProjectPath);
+            if (string.IsNullOrWhiteSpace(path))
+            {
+                return;
+            }
+
+            item.ProjectPath = path;
+            SaveAndRefresh(item: item);
+        };
+        canvas.AddSubItemRequested += item =>
+        {
+            var name = Prompt("新增预设", "名称");
             if (string.IsNullOrWhiteSpace(name))
             {
                 return;
             }
 
-            _projects.Projects.Add(new ProjectBoard { Name = name.Trim() });
-            _store.SaveProjects(_projects);
-            RefreshProjects();
-            RefreshDesktopProjectWidget();
+            var subItem = new ProjectSubItem { Title = name.Trim() };
+            item.SubItems.Add(subItem);
+            SaveAndRefresh(item: item, subItem: subItem);
         };
-        renameProjectButton.Click += (_, _) =>
+        canvas.EditSubItemRequested += subItem =>
         {
-            var project = CurrentProject();
-            if (project is null)
-            {
-                return;
-            }
-
-            var name = Prompt("重命名项目", "项目名称", project.Name);
+            var name = Prompt("编辑预设", "名称", subItem.Title);
             if (string.IsNullOrWhiteSpace(name))
             {
                 return;
             }
 
-            project.Name = name.Trim();
-            _store.SaveProjects(_projects);
-            RefreshProjects();
-            RefreshDesktopProjectWidget();
+            subItem.Title = name.Trim();
+            SaveAndRefresh(subItem: subItem);
         };
-        deleteProjectButton.Click += (_, _) =>
+        canvas.DeleteSubItemRequested += (item, subItem) =>
         {
-            var project = CurrentProject();
-            if (project is null)
+            item.SubItems.Remove(subItem);
+            SaveAndRefresh(item: item);
+        };
+        canvas.SetSubItemPathRequested += subItem =>
+        {
+            if (!string.IsNullOrWhiteSpace(subItem.FilePath) && (File.Exists(subItem.FilePath) || Directory.Exists(subItem.FilePath)))
+            {
+                OpenPath(subItem.FilePath);
+                return;
+            }
+
+            var path = ChooseProjectFilePath(subItem.FilePath);
+            if (string.IsNullOrWhiteSpace(path))
             {
                 return;
             }
 
-            _projects.Projects.Remove(project);
-            _store.SaveProjects(_projects);
-            RefreshProjects();
-            RefreshItems();
-            RefreshDesktopProjectWidget();
+            subItem.FilePath = path;
+            SaveAndRefresh(subItem: subItem);
         };
-
-        RefreshProjects();
-        RefreshItems();
-        _content.Controls.Add(page);
+        canvas.SubItemDoneChanged += subItem =>
+        {
+            SaveAndRefresh(subItem: subItem);
+        };
+        canvas.OpenPathRequested += OpenPath;
+        canvas.RefreshData();
+        _content.Controls.Add(canvas);
     }
-
     private void ConfigureProjectItemList(ListBox list)
     {
         list.DrawMode = DrawMode.OwnerDrawFixed;
@@ -5260,45 +4525,21 @@ public sealed class MainForm : Form
 
     private void BuildLauncherPage()
     {
-        var page = CreatePage("快捷启动");
-        var actions = CreateActionBar();
-        var addButton = CreateButton("添加");
-        var editButton = CreateButton("编辑");
-        var deleteButton = CreateButton("删除");
-        var openButton = CreateButton("启动");
-        var pinButton = CreateButton("添加到桌面");
-        actions.Controls.AddRange(new Control[] { addButton, editButton, deleteButton, openButton, pinButton });
-        page.Controls.Add(actions, 0, 1);
-
-        var list = CreateListBox();
-        list.AllowDrop = true;
-        ConfigureLauncherList(list);
-        page.Controls.Add(CreateGroup("常用软件", list), 0, 2);
-
-        void RefreshLaunchers()
+        var canvas = new LauncherPageCanvas(_launchers, MaxLaunchers)
         {
-            list.Items.Clear();
-            foreach (var item in _launchers.Items)
-            {
-                list.Items.Add(item);
-            }
-        }
-
-        addButton.Click += (_, _) =>
+            Dock = DockStyle.Fill,
+            BackColor = BackColorMain
+        };
+        canvas.AddRequested += () =>
         {
             if (AddLauncher())
             {
-                RefreshLaunchers();
+                canvas.RefreshData();
                 RefreshDesktopLauncherWidget();
             }
         };
-        editButton.Click += (_, _) =>
+        canvas.EditRequested += item =>
         {
-            if (list.SelectedItem is not LaunchItem item)
-            {
-                return;
-            }
-
             var name = Prompt("编辑快捷启动", "显示名称", item.Name);
             if (string.IsNullOrWhiteSpace(name))
             {
@@ -5307,236 +4548,51 @@ public sealed class MainForm : Form
 
             item.Name = name.Trim();
             _store.SaveLaunchers(_launchers);
-            RefreshLaunchers();
+            canvas.RefreshData();
             RefreshDesktopLauncherWidget();
         };
-        deleteButton.Click += (_, _) =>
+        canvas.DeleteRequested += item =>
         {
-            if (list.SelectedItem is not LaunchItem item)
-            {
-                return;
-            }
-
             _launchers.Items.Remove(item);
             _store.SaveLaunchers(_launchers);
-            RefreshLaunchers();
+            canvas.ClearSelection();
+            canvas.RefreshData();
             RefreshDesktopLauncherWidget();
         };
-        pinButton.Click += (_, _) => ShowDesktopLauncherWidget();
-        openButton.Click += (_, _) =>
-        {
-            if (list.SelectedItem is LaunchItem item)
-            {
-                OpenPath(item.Path);
-            }
-        };
-        list.DoubleClick += (_, _) =>
-        {
-            if (list.SelectedItem is LaunchItem item)
-            {
-                OpenPath(item.Path);
-            }
-        };
-        list.DragEnter += (_, e) =>
-        {
-            e.Effect = GetDroppedLauncherPath(e) is null || _launchers.Items.Count >= MaxLaunchers
-                ? DragDropEffects.None
-                : DragDropEffects.Copy;
-        };
-        list.DragOver += (_, e) =>
-        {
-            e.Effect = GetDroppedLauncherPath(e) is null || _launchers.Items.Count >= MaxLaunchers
-                ? DragDropEffects.None
-                : DragDropEffects.Copy;
-        };
-        list.DragDrop += (_, e) =>
+        canvas.PinRequested += () => ShowDesktopLauncherWidget();
+        canvas.OpenRequested += item => OpenPath(item.Path);
+        canvas.LauncherDropped += e =>
         {
             var path = GetDroppedLauncherPath(e);
             if (path is not null && AddLauncherFromPath(path))
             {
-                DustDeskDragData.MarkLauncherCopyHandled(e.Data);
-                RefreshLaunchers();
+                if (e.Data is not null)
+                {
+                    DustDeskDragData.MarkLauncherCopyHandled(e.Data);
+                }
+                canvas.RefreshData();
                 RefreshDesktopLauncherWidget();
             }
         };
-
-        RefreshLaunchers();
-        _content.Controls.Add(page);
+        _content.Controls.Add(canvas);
     }
 
     private void BuildClipboardPage()
     {
-        var page = CreatePage("剪贴板");
-        var actions = CreateActionBar();
-        var copyButton = CreateButton("复制");
-        var deleteButton = CreateButton("删除");
-        var clearButton = CreateSecondaryButton("全部清除");
-        var refreshButton = CreateSecondaryButton("刷新");
-        var pinButton = CreateButton("添加到桌面");
-        actions.Controls.AddRange(new Control[] { copyButton, deleteButton, clearButton, refreshButton, pinButton });
-        page.Controls.Add(actions, 0, 1);
-
-        var pathLabel = new Label
-        {
-            Dock = DockStyle.Top,
-            Height = 28,
-            Text = $"保存路径：{_store.ClipboardPath}",
-            ForeColor = TextColorSubtle,
-            TextAlign = ContentAlignment.MiddleLeft,
-            AutoEllipsis = true
-        };
-        var layout = new TableLayoutPanel
+        var canvas = new ClipboardPageCanvas(_clipboard, _store.ClipboardPath)
         {
             Dock = DockStyle.Fill,
-            ColumnCount = 2,
-            RowCount = 2,
-            BackColor = Color.Transparent
+            BackColor = BackColorMain
         };
-        layout.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 360));
-        layout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
-        layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 32));
-        layout.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
-
-        var list = CreateListBox();
-        list.DrawMode = DrawMode.OwnerDrawFixed;
-        list.ItemHeight = 76;
-        list.DrawItem += (_, e) => DrawClipboardHistoryItem(list, e);
-
-        var previewPanel = new Panel
+        canvas.CopyRequested += CopyClipboardHistoryItem;
+        canvas.DeleteRequested += item =>
         {
-            Dock = DockStyle.Fill,
-            BackColor = PanelColor,
-            Padding = new Padding(12)
-        };
-        var previewText = new TextBox
-        {
-            Dock = DockStyle.Fill,
-            Multiline = true,
-            ReadOnly = true,
-            BorderStyle = BorderStyle.None,
-            ScrollBars = ScrollBars.Vertical,
-            BackColor = PanelColor,
-            ForeColor = TextColorMain,
-            Font = new Font(Font.FontFamily, 11F)
-        };
-        var previewImage = new PictureBox
-        {
-            Dock = DockStyle.Fill,
-            BackColor = PanelColor,
-            SizeMode = PictureBoxSizeMode.Zoom,
-            Visible = false
-        };
-        var statusLabel = new Label
-        {
-            Dock = DockStyle.Bottom,
-            Height = 32,
-            ForeColor = TextColorSubtle,
-            TextAlign = ContentAlignment.MiddleLeft
-        };
-        previewPanel.Controls.Add(previewText);
-        previewPanel.Controls.Add(previewImage);
-        previewPanel.Controls.Add(statusLabel);
-
-        layout.Controls.Add(pathLabel, 0, 0);
-        layout.SetColumnSpan(pathLabel, 2);
-        layout.Controls.Add(CreateGroup("历史记录", list), 0, 1);
-        layout.Controls.Add(CreateGroup("预览", previewPanel), 1, 1);
-        page.Controls.Add(layout, 0, 2);
-
-        ClipboardHistoryItem? CurrentItem() => list.SelectedItem as ClipboardHistoryItem;
-
-        void RefreshPreview()
-        {
-            previewImage.Image?.Dispose();
-            previewImage.Image = null;
-
-            var item = CurrentItem();
-            if (item is null)
-            {
-                previewImage.Visible = false;
-                previewText.Visible = true;
-                previewText.Text = "";
-                statusLabel.Text = "暂无剪贴板记录";
-                previewText.BringToFront();
-                return;
-            }
-
-            statusLabel.Text = $"{ClipboardKindText(item)} · {item.CreatedAt:yyyy-MM-dd HH:mm:ss}";
-            if (item.Kind == ClipboardHistoryKind.Image)
-            {
-                var image = DecodeClipboardImage(item);
-                if (image is null)
-                {
-                    previewImage.Visible = false;
-                    previewText.Visible = true;
-                    previewText.Text = "图片数据无法读取";
-                    previewText.BringToFront();
-                    return;
-                }
-
-                previewText.Visible = false;
-                previewImage.Visible = true;
-                previewImage.Image = image;
-                previewImage.BringToFront();
-                return;
-            }
-
-            previewImage.Visible = false;
-            previewText.Visible = true;
-            previewText.Text = item.Text;
-            previewText.BringToFront();
-        }
-
-        void RefreshHistory(string? selectedId = null)
-        {
-            selectedId ??= CurrentItem()?.Id;
-            list.BeginUpdate();
-            try
-            {
-                list.Items.Clear();
-                foreach (var item in _clipboard.Items)
-                {
-                    list.Items.Add(item);
-                }
-
-                if (!string.IsNullOrWhiteSpace(selectedId))
-                {
-                    list.SelectedItem = _clipboard.Items.FirstOrDefault(item => item.Id == selectedId);
-                }
-
-                if (list.SelectedIndex < 0 && list.Items.Count > 0)
-                {
-                    list.SelectedIndex = 0;
-                }
-            }
-            finally
-            {
-                list.EndUpdate();
-            }
-
-            RefreshPreview();
-        }
-
-        copyButton.Click += (_, _) =>
-        {
-            if (CurrentItem() is ClipboardHistoryItem item)
-            {
-                CopyClipboardHistoryItem(item);
-            }
-        };
-        deleteButton.Click += (_, _) =>
-        {
-            if (CurrentItem() is not ClipboardHistoryItem item)
-            {
-                return;
-            }
-
             _clipboard.Items.Remove(item);
             _store.SaveClipboard(_clipboard);
             RefreshDesktopClipboardWidget();
-            RefreshHistory();
+            canvas.RefreshData();
         };
-        clearButton.Click += (_, _) =>
+        canvas.ClearRequested += () =>
         {
             if (_clipboard.Items.Count == 0)
             {
@@ -5552,45 +4608,33 @@ public sealed class MainForm : Form
             _clipboard.Items.RemoveAll(item => !item.IsLocked);
             _store.SaveClipboard(_clipboard);
             RefreshDesktopClipboardWidget();
-            RefreshHistory();
+            canvas.RefreshData();
         };
-        refreshButton.Click += (_, _) =>
+        canvas.RefreshRequested += () =>
         {
             CaptureClipboardSnapshot();
-            RefreshHistory();
+            canvas.RefreshData();
         };
-        pinButton.Click += (_, _) => ShowDesktopClipboardWidget();
-        list.SelectedIndexChanged += (_, _) => RefreshPreview();
-        list.DoubleClick += (_, _) =>
-        {
-            if (CurrentItem() is ClipboardHistoryItem item)
-            {
-                CopyClipboardHistoryItem(item);
-            }
-        };
+        canvas.PinRequested += () => ShowDesktopClipboardWidget();
         Action refreshPage = () =>
         {
-            if (!list.IsDisposed)
+            if (!canvas.IsDisposed)
             {
-                RefreshHistory();
+                canvas.RefreshData();
             }
         };
         _refreshClipboardPage = refreshPage;
-        list.Disposed += (_, _) =>
+        canvas.Disposed += (_, _) =>
         {
             if (ReferenceEquals(_refreshClipboardPage, refreshPage))
             {
                 _refreshClipboardPage = null;
             }
-
-            previewImage.Image?.Dispose();
-            previewImage.Image = null;
         };
 
-        RefreshHistory();
-        _content.Controls.Add(page);
+        canvas.RefreshData();
+        _content.Controls.Add(canvas);
     }
-
     private void DrawClipboardHistoryItem(ListBox list, DrawItemEventArgs e)
     {
         if (e.Index < 0 || e.Index >= list.Items.Count || list.Items[e.Index] is not ClipboardHistoryItem item)
@@ -5857,81 +4901,62 @@ public sealed class MainForm : Form
 
     private void BuildStatsPage()
     {
-        var page = CreatePage("统计分析");
-        var summary = new TableLayoutPanel
+        var canvas = new StatsPageCanvas(_config, _todos, _projects, _launchers)
         {
             Dock = DockStyle.Fill,
-            ColumnCount = 3,
-            RowCount = 2,
-            BackColor = Color.Transparent
+            BackColor = BackColorMain
         };
-        summary.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 33.33F));
-        summary.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 33.33F));
-        summary.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 33.34F));
-        summary.RowStyles.Add(new RowStyle(SizeType.Percent, 50));
-        summary.RowStyles.Add(new RowStyle(SizeType.Percent, 50));
-
-        summary.Controls.Add(CreateMetricCard("桌面分类", _config.DesktopCategories.Count.ToString()), 0, 0);
-        summary.Controls.Add(CreateMetricCard("任务总数", _todos.Items.Count.ToString()), 1, 0);
-        summary.Controls.Add(CreateMetricCard("已完成", _todos.Items.Count(item => item.Done).ToString()), 2, 0);
-        summary.Controls.Add(CreateMetricCard("项目数量", _projects.Projects.Count.ToString()), 0, 1);
-        summary.Controls.Add(CreateMetricCard("项目事项", _projects.Projects.SelectMany(project => project.Items).Count().ToString()), 1, 1);
-        summary.Controls.Add(CreateMetricCard("快捷启动", _launchers.Items.Count.ToString()), 2, 1);
-        page.Controls.Add(summary, 0, 2);
-        _content.Controls.Add(page);
+        _content.Controls.Add(canvas);
     }
 
     private void BuildSearchSettingsPage()
     {
-        var page = CreatePage("搜索设置");
-        var actions = CreateActionBar();
-        var pinButton = CreateButton("添加到桌面");
-        var openButton = CreateButton("打开搜索");
-        actions.Controls.AddRange(new Control[] { pinButton, openButton });
-        page.Controls.Add(actions, 0, 1);
-
-        var panel = new Panel
+        var canvas = new SearchSettingsCanvas(_config, CustomSearchHintText)
         {
             Dock = DockStyle.Fill,
-            BackColor = Color.FromArgb(118, 30, 40, 56),
-            Padding = new Padding(24),
-            Margin = new Padding(0, 0, 10, 0)
+            BackColor = BackColorMain
         };
-        var stack = new TableLayoutPanel
+        canvas.PinRequested += () => ShowDesktopSearchWidget(centerOnScreen: true, minimizeMain: true);
+        canvas.OpenRequested += ShowQuickSearch;
+        canvas.SettingChanged += () =>
         {
-            Dock = DockStyle.Top,
-            Height = 518,
-            ColumnCount = 1,
-            RowCount = 8,
-            BackColor = Color.Transparent
+            _store.SaveConfig(_config);
+            _desktopSearchWidget?.RefreshSearch();
+            canvas.RefreshData();
         };
-        stack.RowStyles.Add(new RowStyle(SizeType.Absolute, 42));
-        for (var i = 1; i < 8; i++)
+        canvas.AddCustomPathRequested += () =>
         {
-            stack.RowStyles.Add(new RowStyle(SizeType.Absolute, 64));
-        }
+            using var dialog = new FolderBrowserDialog
+            {
+                Description = "选择要加入搜索的位置",
+                SelectedPath = Directory.Exists(_store.DataDirectory) ? _store.DataDirectory : AppContext.BaseDirectory,
+                UseDescriptionForTitle = true
+            };
+            if (dialog.ShowDialog(this) != DialogResult.OK || string.IsNullOrWhiteSpace(dialog.SelectedPath))
+            {
+                return;
+            }
 
-        stack.Controls.Add(new Label
+            var selectedPath = Path.GetFullPath(dialog.SelectedPath);
+            if (!_config.SearchCustomRoots.Any(path => string.Equals(Path.GetFullPath(path), selectedPath, StringComparison.OrdinalIgnoreCase)))
+            {
+                _config.SearchCustomRoots.Add(selectedPath);
+                _config.SearchCustomPaths = true;
+                _store.SaveConfig(_config);
+                _desktopSearchWidget?.RefreshSearch();
+            }
+
+            canvas.RefreshData();
+        };
+        canvas.ClearCustomPathsRequested += () =>
         {
-            Text = "搜索方式",
-            Dock = DockStyle.Fill,
-            ForeColor = TextColorMain,
-            Font = new Font(Font.FontFamily, 11F, FontStyle.Regular),
-            TextAlign = ContentAlignment.MiddleLeft
-        }, 0, 0);
-        stack.Controls.Add(CreateSearchSourceRow("应用内数据", "快捷启动、桌面分类、工作记录、便签、项目条目", _config.SearchAppData, value => _config.SearchAppData = value), 0, 1);
-        stack.Controls.Add(CreateSearchSourceRow("桌面文件", "系统桌面和桌面收纳中的文件、文件夹", _config.SearchDesktopFiles, value => _config.SearchDesktopFiles = value), 0, 2);
-        stack.Controls.Add(CreateSearchSourceRow("开始菜单应用", "开始菜单、公共开始菜单和快捷启动路径", _config.SearchStartMenuApps, value => _config.SearchStartMenuApps = value), 0, 3);
-        stack.Controls.Add(CreateSearchSourceRow("项目路径", "项目、阶段、子任务关联的文件夹和文件", _config.SearchProjectPaths, value => _config.SearchProjectPaths = value), 0, 4);
-        stack.Controls.Add(CreateCustomSearchPathRow(), 0, 5);
-        stack.Controls.Add(CreateSearchTransparentRow(), 0, 6);
-        stack.Controls.Add(CreateSettingRow("桌面组件", "点击上方“添加到桌面”会显示胶囊搜索框"), 0, 7);
-        panel.Controls.Add(stack);
-        page.Controls.Add(panel, 0, 2);
-
-        pinButton.Click += (_, _) => ShowDesktopSearchWidget(centerOnScreen: true, minimizeMain: true);
-        openButton.Click += (_, _) => ShowQuickSearch();
-        _content.Controls.Add(page);
+            _config.SearchCustomRoots.Clear();
+            _store.SaveConfig(_config);
+            _desktopSearchWidget?.RefreshSearch();
+            canvas.RefreshData();
+        };
+        canvas.RefreshData();
+        _content.Controls.Add(canvas);
     }
 
     private Control CreateSearchTransparentRow()
@@ -6087,63 +5112,19 @@ public sealed class MainForm : Form
 
     private void BuildSystemMonitorPage()
     {
-        var page = CreatePage("系统检测");
-        var actions = CreateActionBar();
-        var pinButton = CreateButton("显示桌面组件");
-        var closeButton = CreateSecondaryButton("关闭组件");
-        actions.Controls.AddRange(new Control[] { pinButton, closeButton });
-        page.Controls.Add(actions, 0, 1);
-
-        var panel = new GlassPanel
+        var canvas = new SystemMonitorPageCanvas(_config)
         {
-            Dock = DockStyle.Top,
-            Height = 292,
-            BackColor = CardColor,
-            BorderColor = CardBorderColor,
-            Padding = new Padding(22, 18, 22, 18)
+            Dock = DockStyle.Fill,
+            BackColor = BackColorMain
         };
-        var title = new Label
+        canvas.ShowWidgetRequested += () => ShowDesktopSystemMonitorWidget(minimizeMain: true);
+        canvas.CloseWidgetRequested += CloseDesktopSystemMonitorWidget;
+        canvas.OptionsChanged += () =>
         {
-            Text = "系统检测组件",
-            Dock = DockStyle.Top,
-            Height = 34,
-            ForeColor = TextColorMain,
-            Font = new Font(Font.FontFamily, 13F, FontStyle.Bold),
-            TextAlign = ContentAlignment.MiddleLeft
+            _store.SaveConfig(_config);
+            _desktopSystemMonitorWidget?.RefreshMonitorOptions();
         };
-        var detail = new Label
-        {
-            Text = "选择桌面组件需要显示的检测项；组件支持透明、移动、缩放和右键菜单。",
-            Dock = DockStyle.Top,
-            Height = 52,
-            ForeColor = TextColorSubtle,
-            TextAlign = ContentAlignment.MiddleLeft
-        };
-        var checks = new FlowLayoutPanel
-        {
-            Dock = DockStyle.Top,
-            Height = 122,
-            FlowDirection = FlowDirection.LeftToRight,
-            WrapContents = true,
-            BackColor = Color.Transparent,
-            Padding = new Padding(0, 10, 0, 0)
-        };
-        checks.Controls.Add(CreateSystemMonitorCheck("下载速度", _config.DesktopSystemMonitorShowDownload, value => _config.DesktopSystemMonitorShowDownload = value));
-        checks.Controls.Add(CreateSystemMonitorCheck("上传速度", _config.DesktopSystemMonitorShowUpload, value => _config.DesktopSystemMonitorShowUpload = value));
-        checks.Controls.Add(CreateSystemMonitorCheck("内存", _config.DesktopSystemMonitorShowMemory, value => _config.DesktopSystemMonitorShowMemory = value));
-        checks.Controls.Add(CreateSystemMonitorCheck("CPU", _config.DesktopSystemMonitorShowCpu, value => _config.DesktopSystemMonitorShowCpu = value));
-        checks.Controls.Add(CreateSystemMonitorCheck("磁盘读写", _config.DesktopSystemMonitorShowDiskIo, value => _config.DesktopSystemMonitorShowDiskIo = value));
-        checks.Controls.Add(CreateSystemMonitorCheck("磁盘空间", _config.DesktopSystemMonitorShowDiskSpace, value => _config.DesktopSystemMonitorShowDiskSpace = value));
-        checks.Controls.Add(CreateSystemMonitorCheck("网络延迟", _config.DesktopSystemMonitorShowPing, value => _config.DesktopSystemMonitorShowPing = value));
-        checks.Controls.Add(CreateSystemMonitorCheck("运行时长", _config.DesktopSystemMonitorShowUptime, value => _config.DesktopSystemMonitorShowUptime = value));
-        panel.Controls.Add(checks);
-        panel.Controls.Add(detail);
-        panel.Controls.Add(title);
-        page.Controls.Add(panel, 0, 2);
-
-        pinButton.Click += (_, _) => ShowDesktopSystemMonitorWidget(minimizeMain: true);
-        closeButton.Click += (_, _) => CloseDesktopSystemMonitorWidget();
-        _content.Controls.Add(page);
+        _content.Controls.Add(canvas);
     }
 
     private CheckBox CreateSystemMonitorCheck(string text, bool current, Action<bool> changed)
@@ -6168,70 +5149,135 @@ public sealed class MainForm : Form
 
     private void BuildSettingsPage()
     {
-        var page = CreatePage("设置中心");
-        var panel = new Panel
+        var canvas = new SettingsPageCanvas(
+            _config,
+            _store.DataDirectory,
+            IsAutoStartEnabled,
+            HasVisibleDesktopNoteWidgets)
         {
             Dock = DockStyle.Fill,
-            BackColor = Color.FromArgb(118, 30, 40, 56),
-            Padding = new Padding(16),
-            Margin = new Padding(0, 0, 10, 0),
-            AutoScroll = true
+            BackColor = BackColorMain
         };
-        var stack = new TableLayoutPanel
+        canvas.AutoStartChanged += value =>
         {
-            Dock = DockStyle.Top,
-            Height = 678,
-            ColumnCount = 1,
-            RowCount = 12,
-            BackColor = Color.Transparent
+            SetAutoStart(value);
+            canvas.RefreshData(_store.DataDirectory);
         };
-        stack.RowStyles.Add(new RowStyle(SizeType.Absolute, 30));
-        stack.RowStyles.Add(new RowStyle(SizeType.Absolute, 46));
-        stack.RowStyles.Add(new RowStyle(SizeType.Absolute, 46));
-        stack.RowStyles.Add(new RowStyle(SizeType.Absolute, 92));
-        stack.RowStyles.Add(new RowStyle(SizeType.Absolute, 56));
-        stack.RowStyles.Add(new RowStyle(SizeType.Absolute, 92));
-        stack.RowStyles.Add(new RowStyle(SizeType.Absolute, 60));
-        stack.RowStyles.Add(new RowStyle(SizeType.Absolute, 52));
-        stack.RowStyles.Add(new RowStyle(SizeType.Absolute, 52));
-        stack.RowStyles.Add(new RowStyle(SizeType.Absolute, 52));
-        stack.RowStyles.Add(new RowStyle(SizeType.Absolute, 50));
-        stack.RowStyles.Add(new RowStyle(SizeType.Absolute, 50));
-        stack.Controls.Add(new Label
+        canvas.StartHiddenChanged += value =>
         {
-            Text = "基础设置",
-            Dock = DockStyle.Fill,
-            ForeColor = TextColorMain,
-            Font = new Font(Font.FontFamily, 11F, FontStyle.Regular),
-            TextAlign = ContentAlignment.MiddleLeft
-        }, 0, 0);
-        stack.Controls.Add(CreateStartupSettingRow(), 0, 1);
-        stack.Controls.Add(CreateStartHiddenSettingRow(), 0, 2);
-        var desktopWidgetsRow = CreateDesktopWidgetsSettingRow();
-        stack.Controls.Add(desktopWidgetsRow, 0, 3);
-        stack.Controls.Add(CreateHotKeySettingRow(), 0, 4);
-        var organizerHotKeyRow = CreateOrganizerHotKeySettingRow();
-        stack.Controls.Add(organizerHotKeyRow, 0, 5);
-        stack.Controls.Add(CreateDataPathSettingRow(), 0, 6);
-        stack.Controls.Add(CreateRestoreDesktopSettingRow(), 0, 7);
-        stack.Controls.Add(CreateProjectExportSettingRow(), 0, 8);
-        stack.Controls.Add(CreateOperationIntroSettingRow(), 0, 9);
-        stack.Controls.Add(CreateAboutSettingRow(), 0, 10);
-        stack.Controls.Add(CreateResetDataSettingRow(), 0, 11);
-        panel.Controls.Add(stack);
-        page.Controls.Add(panel, 0, 2);
-        void UpdateWrappingRows()
+            _config.StartHiddenToTray = value;
+            _store.SaveConfig(_config);
+            canvas.RefreshData(_store.DataDirectory);
+        };
+        canvas.WidgetChanged += (key, visible) =>
         {
-            UpdateWrappingSettingRow(stack, 3, desktopWidgetsRow, 46);
-            UpdateWrappingSettingRow(stack, 5, organizerHotKeyRow, 56);
+            switch (key)
+            {
+                case "search": if (visible) ShowDesktopSearchWidget(centerOnScreen: true, minimizeMain: true); else CloseDesktopSearchWidget(); break;
+                case "organizer": if (visible) ShowDesktopOrganizerWidget(); else CloseDesktopOrganizerWidget(); break;
+                case "todo": if (visible) ShowDesktopTodoWidget(); else CloseDesktopTodoWidget(); break;
+                case "note": if (visible) ShowDesktopNoteWidgets(); else CloseDesktopNoteWidgets(); break;
+                case "project": if (visible) ShowDesktopProjectWidget(); else CloseDesktopProjectWidget(); break;
+                case "launcher": if (visible) ShowDesktopLauncherWidget(); else CloseDesktopLauncherWidget(); break;
+                case "monitor": if (visible) ShowDesktopSystemMonitorWidget(); else CloseDesktopSystemMonitorWidget(); break;
+                case "clipboard": if (visible) ShowDesktopClipboardWidget(); else CloseDesktopClipboardWidget(); break;
+            }
+
+            canvas.RefreshData(_store.DataDirectory);
+        };
+        canvas.MainHotKeySaveRequested += value => SaveHotKey(value, hotKey => _config.MainWindowHotKey = hotKey, RegisterMainWindowHotKey, canvas);
+        canvas.DesktopHotKeySaveRequested += value => SaveHotKey(value, hotKey => _config.DesktopOrganizerHotKey = hotKey, RegisterDesktopOrganizerHotKey, canvas);
+        canvas.DesktopHotKeyTargetChanged += (key, value) =>
+        {
+            switch (key)
+            {
+                case "search": _config.DesktopHotKeyToggleSearch = value; break;
+                case "organizer": _config.DesktopHotKeyToggleOrganizer = value; break;
+                case "todo": _config.DesktopHotKeyToggleTodo = value; break;
+                case "note": _config.DesktopHotKeyToggleNote = value; break;
+                case "project": _config.DesktopHotKeyToggleProject = value; break;
+                case "launcher": _config.DesktopHotKeyToggleLauncher = value; break;
+                case "monitor": _config.DesktopHotKeyToggleSystemMonitor = value; break;
+                case "clipboard": _config.DesktopHotKeyToggleClipboard = value; break;
+            }
+
+            _store.SaveConfig(_config);
+            canvas.RefreshData(_store.DataDirectory);
+        };
+        canvas.ChooseDataPathRequested += () =>
+        {
+            using var dialog = new FolderBrowserDialog
+            {
+                Description = "选择文件保存路径",
+                SelectedPath = Directory.Exists(_store.DataDirectory) ? _store.DataDirectory : AppContext.BaseDirectory,
+                UseDescriptionForTitle = true
+            };
+            if (dialog.ShowDialog(this) != DialogResult.OK || string.IsNullOrWhiteSpace(dialog.SelectedPath))
+            {
+                return;
+            }
+
+            var selectedPath = Path.GetFullPath(dialog.SelectedPath);
+            var hasExistingData = _store.HasDataDirectory(selectedPath)
+                && !string.Equals(selectedPath, _store.DataDirectory, StringComparison.OrdinalIgnoreCase);
+            if (hasExistingData)
+            {
+                var result = MessageBox.Show(
+                    this,
+                    "这个文件夹里已有 DustDesk 数据。\n\n点“是”读取这个位置的数据并重启；点“否”把当前数据复制到这个位置。",
+                    "切换数据位置",
+                    MessageBoxButtons.YesNoCancel,
+                    MessageBoxIcon.Question);
+                if (result == DialogResult.Cancel)
+                {
+                    return;
+                }
+
+                if (result == DialogResult.Yes)
+                {
+                    _store.SetDataDirectory(selectedPath, copyExistingData: false);
+                    MessageBox.Show(this, "数据位置已切换，程序将重启后读取。", "DustDesk", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                    _exitRequested = true;
+                    _closingApp = true;
+                    Application.Restart();
+                    Close();
+                    return;
+                }
+            }
+
+            _store.SetDataDirectory(selectedPath);
+            SaveAllData();
+            canvas.RefreshData(_store.DataDirectory);
+        };
+        canvas.RestoreDesktopRequested += RestoreAllDesktopItems;
+        canvas.ExportProjectsRequested += ExportProjectsToExcel;
+        canvas.IntroRequested += () => MessageBox.Show(
+            this,
+            "1. 桌面收纳：创建分类，把桌面文件拖入分类；从收纳拖出可还原。\n2. 工作记录、便签、项目、快捷启动都可添加为桌面组件。\n3. 首页搜索或 Ctrl+K 可快速检索文件、应用、项目和记录。\n4. Ctrl+Shift+K 唤起主窗口，Ctrl+Shift+D 唤起桌面收纳。",
+            "操作简介",
+            MessageBoxButtons.OK,
+            MessageBoxIcon.Information);
+        canvas.AboutRequested += () => OpenUrl("https://www.douyin.com/search/Aby081298");
+        canvas.ResetRequested += ResetAllData;
+        canvas.RefreshData(_store.DataDirectory);
+        _content.Controls.Add(canvas);
+
+        void SaveHotKey(string value, Action<string> saveValue, Action registerHotKey, SettingsPageCanvas target)
+        {
+            value = value.Trim();
+            if (!TryParseHotKey(value, out _, out _))
+            {
+                MessageBox.Show(this, "快捷指令格式不正确。", "DustDesk", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                return;
+            }
+
+            saveValue(value);
+            _store.SaveConfig(_config);
+            registerHotKey();
+            target.RefreshData(_store.DataDirectory);
+            MessageBox.Show(this, "快捷指令已保存。", "DustDesk", MessageBoxButtons.OK, MessageBoxIcon.Information);
         }
-
-        stack.SizeChanged += (_, _) => UpdateWrappingRows();
-        panel.SizeChanged += (_, _) => UpdateWrappingRows();
-        BeginInvoke(new Action(UpdateWrappingRows));
-        _content.Controls.Add(page);
     }
-
     private Control CreateMetricCard(string title, string value)
     {
         var card = CreateHomeCard(title, out var body);
@@ -6971,6 +6017,7 @@ public sealed class MainForm : Form
         _clipboard.Items.Clear();
         _desktopNoteWidgets.Clear();
         _desktopOrganizerSplitWidgets.Clear();
+        _desktopOrganizerSplitWidgetCategories.Clear();
         _desktopProjectSplitWidgets.Clear();
         _desktopOrganizerWidget = null;
         _desktopTodoWidget = null;
@@ -7396,6 +6443,32 @@ public sealed class MainForm : Form
         catch (Exception ex)
         {
             MessageBox.Show(ex.Message, "打开失败", MessageBoxButtons.OK, MessageBoxIcon.Error);
+        }
+    }
+
+    private async void CheckForUpdatesOnStartup()
+    {
+        try
+        {
+            var update = await UpdateChecker.CheckLatestAsync();
+            if (update is null || IsDisposed)
+            {
+                return;
+            }
+
+            var result = MessageBox.Show(
+                this,
+                $"发现新版本 v{update.VersionText}。\n当前版本 v{UpdateChecker.CurrentVersionText}。\n\n是否打开下载地址？下载后请退出 DustDesk，再解压覆盖旧目录。",
+                "DustDesk 更新",
+                MessageBoxButtons.YesNo,
+                MessageBoxIcon.Information);
+            if (result == DialogResult.Yes)
+            {
+                OpenUrl(update.DownloadUrl);
+            }
+        }
+        catch
+        {
         }
     }
 
@@ -9758,6 +8831,13 @@ internal sealed class DesktopLauncherWidgetView : Control
     private static GraphicsPath RoundPath(Rectangle rect, int radius)
     {
         var path = new GraphicsPath();
+        if (rect.Width <= 1 || rect.Height <= 1 || radius <= 0)
+        {
+            path.AddRectangle(rect);
+            return path;
+        }
+
+        radius = Math.Min(radius, Math.Min(rect.Width, rect.Height) / 2);
         var diameter = radius * 2;
         rect.Width -= 1;
         rect.Height -= 1;
@@ -13378,12 +12458,12 @@ internal static class DesktopOrganizerStorage
         }
 
         var sourceWasDirectory = Directory.Exists(source);
-        target = GetAvailableTargetPath(target, sourceWasDirectory);
         if (sourceWasDirectory && IsSubPathOf(target, source))
         {
             return source;
         }
 
+        DeleteExistingTarget(target);
         if (File.Exists(source))
         {
             MoveFile(source, target);
@@ -13395,6 +12475,20 @@ internal static class DesktopOrganizerStorage
 
         NativeGlass.NotifyShellMoved(source, target, sourceWasDirectory);
         return target;
+    }
+
+    private static void DeleteExistingTarget(string target)
+    {
+        if (File.Exists(target))
+        {
+            File.Delete(target);
+            return;
+        }
+
+        if (Directory.Exists(target))
+        {
+            Directory.Delete(target, recursive: true);
+        }
     }
 
     private static void MoveFile(string source, string target)
@@ -13752,6 +12846,27 @@ internal sealed class DragPreviewForm : Form
     }
 }
 
+internal sealed class DesktopOrganizerMergeTarget
+{
+    private DesktopOrganizerMergeTarget(string name, bool isMain, DesktopOrganizerWidgetForm? widget)
+    {
+        Name = name;
+        IsMain = isMain;
+        Widget = widget;
+    }
+
+    public string Name { get; }
+    public bool IsMain { get; }
+    public DesktopOrganizerWidgetForm? Widget { get; }
+
+    public static DesktopOrganizerMergeTarget MainTarget() => new("主桌面收纳", true, null);
+
+    public static DesktopOrganizerMergeTarget Split(DesktopOrganizerWidgetForm widget, string name)
+    {
+        return new(string.IsNullOrWhiteSpace(name) ? "未命名组件" : name, false, widget);
+    }
+}
+
 internal sealed class DesktopOrganizerWidgetForm : Form
 {
     private const int WsExToolWindow = 0x00000080;
@@ -13815,12 +12930,17 @@ internal sealed class DesktopOrganizerWidgetForm : Form
     }
 
     public event Action? ManageRequested;
-    public event Action<DeskCategory>? SplitRequested;
-    public event Action? MergeRequested;
+    public event Action<IReadOnlyList<DeskCategory>>? SplitRequested;
+    public event Action<DesktopOrganizerMergeTarget>? MergeRequested;
 
     public void RefreshWidget()
     {
         RefreshList();
+    }
+
+    public void SetMergeTargets(IReadOnlyList<DesktopOrganizerMergeTarget> targets)
+    {
+        _view.SetMergeTargets(targets);
     }
 
     public void SaveCurrentPlacement()
@@ -14032,8 +13152,8 @@ internal sealed class DesktopOrganizerWidgetForm : Form
         _view.AddCategoryRequested += AddCategoryFromWidget;
         _view.ManageRequested += () => ManageRequested?.Invoke();
         _view.OrganizeRequested += () => ManageRequested?.Invoke();
-        _view.SplitRequested += category => SplitRequested?.Invoke(category);
-        _view.MergeRequested += () => MergeRequested?.Invoke();
+        _view.SplitRequested += categories => SplitRequested?.Invoke(categories);
+        _view.MergeRequested += target => MergeRequested?.Invoke(target);
         _view.PathDroppedRequested += AddPathToCategoryFromWidget;
         _view.PathRemovedRequested += MovePathOutFromWidget;
         _view.PathDetachedRequested += RemovePathFromOrganizerWidget;
@@ -14485,8 +13605,10 @@ internal sealed class DesktopOrganizerWidgetView : Control
     private readonly List<(Rectangle Rect, int Index)> _categoryTabAreas = new();
     private readonly List<(Rectangle Rect, Rectangle Tile, DeskCategory Category, string Path, int Index)> _itemAreas = new();
     private readonly Dictionary<DeskCategory, int> _previewScrollOffsets = new();
+    private readonly HashSet<DeskCategory> _multiSelectedCategories = new();
     private readonly Dictionary<string, Image> _shellIconCache = new(StringComparer.OrdinalIgnoreCase);
     private readonly List<Image> _menuItemImages = new();
+    private readonly List<DesktopOrganizerMergeTarget> _mergeTargets = new();
     private readonly ContextMenuStrip _menu = new();
     private readonly ContextMenuStrip _settingsMenu = new();
     private readonly System.Windows.Forms.Timer _menuDismissTimer = new() { Interval = 40 };
@@ -14531,6 +13653,7 @@ internal sealed class DesktopOrganizerWidgetView : Control
     private int _categoryTabDragStartOffset;
     private int _categoryTabScrollOffset;
     private int? _pendingCategoryDragIndex;
+    private bool _pendingCategoryMultiSelect;
     private Point _pendingCategoryDragStart;
     private bool _draggingCategoryReorder;
     private int _categoryReorderSourceIndex = -1;
@@ -14590,22 +13713,39 @@ internal sealed class DesktopOrganizerWidgetView : Control
         _settingsMenu.Opened += (_, _) => StartMenuDismissWatcher();
         _settingsMenu.Closed += (_, _) => StopMenuDismissWatcherIfMenusClosed();
         _menuDismissTimer.Tick += (_, _) => CloseMenusIfClickedOutside();
-        _categoryLongPressTimer.Tick += (_, _) => BeginCategoryReorder();
+        _categoryLongPressTimer.Tick += (_, _) =>
+        {
+            if (_pendingCategoryMultiSelect)
+            {
+                TogglePendingCategorySelection();
+            }
+            else
+            {
+                BeginCategoryReorder();
+            }
+        };
         var addCategoryMenuItem = _settingsMenu.Items.Add("添加分类", null, (_, _) => AddCategoryRequested?.Invoke());
         SetMenuIcon(addCategoryMenuItem, "zicaidan", "1.png");
         var layoutMenu = new ToolStripMenuItem("桌面布局");
         SetMenuIcon(layoutMenu, "zicaidan", "2.png");
         _splitMenuItem.Click += (_, _) =>
         {
-            var category = CurrentCategory();
-            if (category is not null)
+            var categories = SplitTargetCategories();
+            if (categories.Count > 0)
             {
-                SplitRequested?.Invoke(category);
+                SplitRequested?.Invoke(categories);
             }
         };
         SetMenuIcon(_splitMenuItem, "zicaidan", "2-2.png");
         layoutMenu.DropDownItems.Add(_splitMenuItem);
-        _mergeMenuItem.Click += (_, _) => MergeRequested?.Invoke();
+        _mergeMenuItem.Click += (_, _) =>
+        {
+            var target = _mergeTargets.FirstOrDefault(target => target.IsMain);
+            if (target is not null)
+            {
+                MergeRequested?.Invoke(target);
+            }
+        };
         SetMenuIcon(_mergeMenuItem, "zicaidan", "2-2.png");
         layoutMenu.DropDownItems.Add(_mergeMenuItem);
         _lockPositionMenuItem.CheckOnClick = true;
@@ -14671,8 +13811,11 @@ internal sealed class DesktopOrganizerWidgetView : Control
             _showNamesMenuItem.Checked = _config.DesktopOrganizerShowNames;
             hideMenuItem.Visible = !_isSplit;
             _splitMenuItem.Visible = !_isSplit;
-            _splitMenuItem.Enabled = CurrentCategory() is not null && Categories().Count > 1;
+            var splitTargets = SplitTargetCategories();
+            _splitMenuItem.Enabled = splitTargets.Count > 0 && Categories().Count > 1;
+            _splitMenuItem.Text = splitTargets.Count > 1 ? $"拆分选中区域（{splitTargets.Count}）" : "拆分为区域";
             _mergeMenuItem.Visible = _isSplit;
+            RebuildMergeTargetMenu();
             _lockPositionMenuItem.Checked = _positionLocked;
             _lockPositionMenuItem.Text = _positionLocked ? "已锁定" : "锁定位置";
             smallIconMenuItem.Checked = CurrentIconSize <= 42;
@@ -14719,8 +13862,8 @@ internal sealed class DesktopOrganizerWidgetView : Control
     public event Action? AddCategoryRequested;
     public event Action? ManageRequested;
     public event Action? OrganizeRequested;
-    public event Action<DeskCategory>? SplitRequested;
-    public event Action? MergeRequested;
+    public event Action<IReadOnlyList<DeskCategory>>? SplitRequested;
+    public event Action<DesktopOrganizerMergeTarget>? MergeRequested;
     public event Action? SkinChangedRequested;
     public event Action<DeskCategory, string, int?>? PathDroppedRequested;
     public event Action<string>? PathRemovedRequested;
@@ -14736,6 +13879,31 @@ internal sealed class DesktopOrganizerWidgetView : Control
         _lockPositionMenuItem.Checked = locked;
         _lockPositionMenuItem.Text = locked ? "已锁定" : "锁定位置";
         SetMenuIcon(_lockPositionMenuItem, "zicaidan", _positionLocked ? "2-3.png" : "2-4.png");
+    }
+
+    public void SetMergeTargets(IReadOnlyList<DesktopOrganizerMergeTarget> targets)
+    {
+        _mergeTargets.Clear();
+        _mergeTargets.AddRange(targets);
+        RebuildMergeTargetMenu();
+    }
+
+    private void RebuildMergeTargetMenu()
+    {
+        _mergeMenuItem.DropDownItems.Clear();
+        if (!_isSplit)
+        {
+            return;
+        }
+
+        var targets = _mergeTargets.Count == 0
+            ? new[] { DesktopOrganizerMergeTarget.MainTarget() }
+            : _mergeTargets.ToArray();
+        foreach (var target in targets)
+        {
+            var item = _mergeMenuItem.DropDownItems.Add(target.Name);
+            item.Click += (_, _) => MergeRequested?.Invoke(target);
+        }
     }
 
     private void SetMenuIcon(ToolStripItem item, params string[] imageParts)
@@ -14809,6 +13977,7 @@ internal sealed class DesktopOrganizerWidgetView : Control
             _selectedCategoryIndex = Math.Max(0, categories.Count - 1);
         }
 
+        _multiSelectedCategories.RemoveWhere(category => !categories.Contains(category));
         Invalidate();
     }
 
@@ -14834,6 +14003,7 @@ internal sealed class DesktopOrganizerWidgetView : Control
         _categoryReorderTabSize = sourceTab.IsEmpty ? new Size(84, 31) : sourceTab.Size;
         _categoryReorderLocation = _pendingCategoryDragStart;
         _pendingCategoryDragIndex = null;
+        _pendingCategoryMultiSelect = false;
         _draggingCategoryReorder = true;
         Capture = true;
         Cursor = Cursors.SizeAll;
@@ -14914,6 +14084,55 @@ internal sealed class DesktopOrganizerWidgetView : Control
         return categories.Count == 0 ? null : categories[Math.Clamp(_selectedCategoryIndex, 0, categories.Count - 1)];
     }
 
+    private IReadOnlyList<DeskCategory> SplitTargetCategories()
+    {
+        var categories = Categories();
+        var selected = categories.Where(category => _multiSelectedCategories.Contains(category)).ToArray();
+        if (selected.Length > 0)
+        {
+            return selected;
+        }
+
+        var current = CurrentCategory();
+        return current is null ? Array.Empty<DeskCategory>() : new[] { current };
+    }
+
+    private void TogglePendingCategorySelection()
+    {
+        _categoryLongPressTimer.Stop();
+        if (_pendingCategoryDragIndex is null)
+        {
+            return;
+        }
+
+        var categories = Categories();
+        var index = _pendingCategoryDragIndex.Value;
+        _pendingCategoryDragIndex = null;
+        _pendingCategoryMultiSelect = false;
+        Capture = false;
+        if (index < 0 || index >= categories.Count)
+        {
+            return;
+        }
+
+        ToggleCategorySelection(categories[index], index);
+    }
+
+    private void ToggleCategorySelection(DeskCategory category, int index)
+    {
+        if (!_multiSelectedCategories.Add(category))
+        {
+            _multiSelectedCategories.Remove(category);
+        }
+
+        if (_multiSelectedCategories.Count == 0)
+        {
+            _selectedCategoryIndex = index;
+        }
+
+        Invalidate();
+    }
+
     protected override void WndProc(ref Message m)
     {
         if (m.Msg == WmContextMenu)
@@ -14989,9 +14208,21 @@ internal sealed class DesktopOrganizerWidgetView : Control
             var tabHit = _categoryTabAreas.FirstOrDefault(item => item.Rect.Contains(e.Location));
             if (!tabHit.Rect.IsEmpty)
             {
+                var ctrlPressed = (ModifierKeys & Keys.Control) == Keys.Control;
                 _selectedCategoryIndex = tabHit.Index;
                 _previewScrollOffsets.Clear();
+                if (ctrlPressed)
+                {
+                    ToggleCategorySelection(Categories()[tabHit.Index], tabHit.Index);
+                    return;
+                }
+
+                if (!ctrlPressed)
+                {
+                    _multiSelectedCategories.Clear();
+                }
                 _pendingCategoryDragIndex = tabHit.Index;
+                _pendingCategoryMultiSelect = false;
                 _pendingCategoryDragStart = e.Location;
                 _categoryLongPressTimer.Stop();
                 _categoryLongPressTimer.Start();
@@ -15049,6 +14280,7 @@ internal sealed class DesktopOrganizerWidgetView : Control
             {
                 _categoryLongPressTimer.Stop();
                 _pendingCategoryDragIndex = null;
+                _pendingCategoryMultiSelect = false;
                 if (CanScrollCategoryTabs(_categoryTabArea.Width))
                 {
                     _draggingCategoryTabs = true;
@@ -15131,6 +14363,7 @@ internal sealed class DesktopOrganizerWidgetView : Control
         {
             _categoryLongPressTimer.Stop();
             _pendingCategoryDragIndex = null;
+            _pendingCategoryMultiSelect = false;
             Capture = false;
             return;
         }
@@ -15490,20 +14723,24 @@ internal sealed class DesktopOrganizerWidgetView : Control
                 if (tab.Right >= area.Left && tab.Left <= area.Right)
                 {
                     var selected = i == _selectedCategoryIndex;
+                    var multiSelected = _multiSelectedCategories.Contains(categories[i]);
                     var dragTarget = i == _dragTargetCategoryIndex;
                     if (!_draggingCategoryReorder || i != _categoryReorderSourceIndex)
                     {
-                        if (selected || dragTarget)
+                        if (selected || multiSelected || dragTarget)
                         {
-                            FillRound(g, tab, dragTarget ? Color.FromArgb(132, 58, 144, 255) : Color.FromArgb(88, 58, 109, 248), 6);
+                            var fill = dragTarget ? Color.FromArgb(132, 58, 144, 255)
+                                : multiSelected ? Color.FromArgb(118, 58, 109, 248)
+                                : Color.FromArgb(88, 58, 109, 248);
+                            FillRound(g, tab, fill, 6);
                         }
 
-                        if (dragTarget)
+                        if (multiSelected || dragTarget)
                         {
                             DrawRound(g, tab, Color.FromArgb(210, 178, 210, 255), 6);
                         }
 
-                        DrawCategoryTab(g, tab, name, i, selected ? Color.White : TextMain);
+                        DrawCategoryTab(g, tab, name, i, selected || multiSelected ? Color.White : TextMain);
                     }
                     _categoryTabAreas.Add((tab, i));
                 }
@@ -15688,8 +14925,10 @@ internal sealed class DesktopOrganizerWidgetView : Control
             var effect = DoDragDrop(data, DragDropEffects.Move | DragDropEffects.Copy);
             if (effect != DragDropEffects.None)
             {
-                _handledActiveDraggedItemDrop = true;
-                PathDetachedRequested?.Invoke(path);
+                if (!_handledActiveDraggedItemDrop)
+                {
+                    PathDetachedRequested?.Invoke(path);
+                }
             }
             else if (!_handledActiveDraggedItemDrop)
             {
@@ -19180,6 +18419,3529 @@ internal sealed class DesktopSearchWidgetForm : Form
     }
 }
 
+internal sealed class SettingsPageCanvas : Control
+{
+    private readonly AppConfig _config;
+    private readonly Func<bool> _autoStartProvider;
+    private readonly Func<bool> _noteVisibleProvider;
+    private readonly TextBox _mainHotKeyBox = CreateHotKeyBox();
+    private readonly TextBox _desktopHotKeyBox = CreateHotKeyBox();
+    private readonly List<(Rectangle Rect, string Key)> _hotspots = new();
+    private string _dataDirectory;
+    private string? _hoverKey;
+
+    private static readonly Color Back = Color.FromArgb(22, 30, 42);
+    private static readonly Color CardFill = Color.FromArgb(118, 30, 40, 56);
+    private static readonly Color CardBorder = Color.FromArgb(72, 90, 112);
+    private static readonly Color TextMain = Color.FromArgb(238, 243, 249);
+    private static readonly Color TextSubtle = Color.FromArgb(155, 168, 186);
+    private static readonly Color Accent = Color.FromArgb(35, 107, 238);
+    private static readonly Font HeaderFont = new("Microsoft YaHei UI", 18F, FontStyle.Regular);
+    private static readonly Font SectionFont = new("Microsoft YaHei UI", 11.5F, FontStyle.Regular);
+    private static readonly Font NormalFont = new("Microsoft YaHei UI", 9.5F, FontStyle.Regular);
+    private static readonly Font ButtonFont = new("Microsoft YaHei UI", 9F, FontStyle.Regular);
+
+    public SettingsPageCanvas(AppConfig config, string dataDirectory, Func<bool> autoStartProvider, Func<bool> noteVisibleProvider)
+    {
+        _config = config;
+        _dataDirectory = dataDirectory;
+        _autoStartProvider = autoStartProvider;
+        _noteVisibleProvider = noteVisibleProvider;
+        Controls.Add(_mainHotKeyBox);
+        Controls.Add(_desktopHotKeyBox);
+        SetStyle(ControlStyles.AllPaintingInWmPaint | ControlStyles.UserPaint | ControlStyles.OptimizedDoubleBuffer | ControlStyles.ResizeRedraw | ControlStyles.SupportsTransparentBackColor, true);
+    }
+
+    public event Action<bool>? AutoStartChanged;
+    public event Action<bool>? StartHiddenChanged;
+    public event Action<string, bool>? WidgetChanged;
+    public event Action<string>? MainHotKeySaveRequested;
+    public event Action<string>? DesktopHotKeySaveRequested;
+    public event Action<string, bool>? DesktopHotKeyTargetChanged;
+    public event Action? ChooseDataPathRequested;
+    public event Action? RestoreDesktopRequested;
+    public event Action? ExportProjectsRequested;
+    public event Action? IntroRequested;
+    public event Action? AboutRequested;
+    public event Action? ResetRequested;
+
+    public void RefreshData(string dataDirectory)
+    {
+        _dataDirectory = dataDirectory;
+        _mainHotKeyBox.Text = string.IsNullOrWhiteSpace(_config.MainWindowHotKey) ? "Ctrl+Shift+K" : _config.MainWindowHotKey;
+        _desktopHotKeyBox.Text = string.IsNullOrWhiteSpace(_config.DesktopOrganizerHotKey) ? "Ctrl+Shift+D" : _config.DesktopOrganizerHotKey;
+        Invalidate();
+    }
+
+    protected override void OnPaint(PaintEventArgs e)
+    {
+        var g = e.Graphics;
+        g.SmoothingMode = SmoothingMode.AntiAlias;
+        _hotspots.Clear();
+        using (var back = new SolidBrush(Back))
+        {
+            g.FillRectangle(back, ClientRectangle);
+        }
+
+        TextRenderer.DrawText(g, "设置中心", HeaderFont, new Rectangle(0, 0, Width, 70), TextMain, TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis);
+        DrawSettings(g, new Rectangle(0, 112, Math.Max(1, Width - 10), Math.Max(1, Height - 138)));
+        PositionInputs();
+    }
+
+    private void DrawSettings(Graphics g, Rectangle rect)
+    {
+        DrawRoundRect(g, rect, CardFill, CardBorder, 10);
+        var x = rect.X + 28;
+        var y = rect.Y + 20;
+        TextRenderer.DrawText(g, "基础设置", SectionFont, new Rectangle(x, y, rect.Width - 56, 30), TextMain, TextFormatFlags.Left | TextFormatFlags.VerticalCenter);
+        y += 40;
+        DrawToggleLine(g, x, y, "autoStart", "开机自动启动", _autoStartProvider());
+        y += 46;
+        DrawToggleLine(g, x, y, "startHidden", "启动隐藏到托盘", _config.StartHiddenToTray);
+        y += 46;
+        DrawWidgetLine(g, x, y, rect.Width - 56);
+        y += 82;
+        DrawHotKeyLine(g, x, y, "打开/关闭主窗口", "mainSave", false);
+        y += 56;
+        DrawHotKeyLine(g, x, y, "打开/关闭桌面组件", "desktopSave", true);
+        y += 126;
+        DrawDataPathLine(g, x, y, rect.Width - 56);
+        y += 62;
+        DrawActionLine(g, x, y, "恢复桌面布局", "restore", "恢复到桌面", "将桌面收纳中的所有项目移回系统桌面", false);
+        y += 52;
+        DrawActionLine(g, x, y, "导出项目管理", "export", "导出 Excel", "导出 xlsx 表格，项目、事项、子任务路径会写入超链接", false);
+        y += 52;
+        DrawActionLine(g, x, y, "操作简介", "intro", "查看", "查看常用操作和快捷入口", false);
+        y += 50;
+        DrawActionLine(g, x, y, "关于我的", "about", "关注抖音", "反馈问题和咨询", false);
+        y += 50;
+        DrawActionLine(g, x, y, "重置所有数据", "reset", "重置", "清空所有应用数据，收纳内容会先恢复到桌面", true);
+    }
+
+    private void DrawToggleLine(Graphics g, int x, int y, string key, string title, bool enabled)
+    {
+        TextRenderer.DrawText(g, title, NormalFont, new Rectangle(x, y, 172, 34), TextMain, TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis);
+        DrawCheckBox(g, new Rectangle(x + 176, y + 7, 22, 22), enabled);
+        _hotspots.Add((new Rectangle(x + 168, y, 112, 34), key));
+        TextRenderer.DrawText(g, enabled ? "已开启" : "已关闭", NormalFont, new Rectangle(x + 206, y, 88, 34), TextMain, TextFormatFlags.Left | TextFormatFlags.VerticalCenter);
+    }
+
+    private void DrawWidgetLine(Graphics g, int x, int y, int width)
+    {
+        TextRenderer.DrawText(g, "桌面组件显示", NormalFont, new Rectangle(x, y, 160, 34), TextMain, TextFormatFlags.Left | TextFormatFlags.VerticalCenter);
+        var widgets = new (string Key, string Text, bool Visible)[]
+        {
+            ("widget_search", "搜索", _config.DesktopSearchWidget?.Visible == true),
+            ("widget_organizer", "桌面收纳", _config.DesktopOrganizerWidget?.Visible == true),
+            ("widget_todo", "工作记录", _config.DesktopTodoWidget?.Visible == true),
+            ("widget_note", "便签", _noteVisibleProvider()),
+            ("widget_project", "项目管理", _config.DesktopProjectWidget?.Visible == true),
+            ("widget_launcher", "快捷启动", _config.DesktopLauncherWidget?.Visible == true),
+            ("widget_monitor", "系统检测", _config.DesktopSystemMonitorWidget?.Visible == true),
+            ("widget_clipboard", "剪贴板", _config.DesktopClipboardWidget?.Visible == true)
+        };
+        DrawInlineToggles(g, x + 176, y, width - 176, widgets);
+    }
+
+    private void DrawHotKeyLine(Graphics g, int x, int y, string title, string saveKey, bool withTargets)
+    {
+        TextRenderer.DrawText(g, title, NormalFont, new Rectangle(x, y, 160, 34), TextMain, TextFormatFlags.Left | TextFormatFlags.VerticalCenter);
+        var save = new Rectangle(x + 370, y + 1, 82, 32);
+        DrawButton(g, save, "保存", true, _hoverKey == saveKey, false);
+        _hotspots.Add((save, saveKey));
+        TextRenderer.DrawText(g, "格式示例：Ctrl+Shift+K、Ctrl+Alt+Space", NormalFont, new Rectangle(x + 470, y, 430, 34), TextSubtle, TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis);
+        if (!withTargets)
+        {
+            return;
+        }
+
+        var targets = new (string Key, string Text, bool Visible)[]
+        {
+            ("hot_search", "搜索", _config.DesktopHotKeyToggleSearch),
+            ("hot_organizer", "桌面收纳", _config.DesktopHotKeyToggleOrganizer),
+            ("hot_todo", "工作记录", _config.DesktopHotKeyToggleTodo),
+            ("hot_note", "便签", _config.DesktopHotKeyToggleNote),
+            ("hot_project", "项目管理", _config.DesktopHotKeyToggleProject),
+            ("hot_launcher", "快捷启动", _config.DesktopHotKeyToggleLauncher),
+            ("hot_monitor", "系统检测", _config.DesktopHotKeyToggleSystemMonitor),
+            ("hot_clipboard", "剪贴板", _config.DesktopHotKeyToggleClipboard)
+        };
+        DrawInlineToggles(g, x + 176, y + 40, Math.Max(1, Width - x - 220), targets);
+    }
+
+    private void DrawDataPathLine(Graphics g, int x, int y, int width)
+    {
+        TextRenderer.DrawText(g, "文件保存路径", NormalFont, new Rectangle(x, y, 160, 34), TextMain, TextFormatFlags.Left | TextFormatFlags.VerticalCenter);
+        TextRenderer.DrawText(g, _dataDirectory, NormalFont, new Rectangle(x + 176, y, Math.Max(1, width - 330), 24), TextSubtle, TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis);
+        TextRenderer.DrawText(g, "换新版本后，可点“选择”找到之前的数据文件夹并读取。", NormalFont, new Rectangle(x + 176, y + 24, Math.Max(1, width - 330), 22), Color.FromArgb(136, 154, 178), TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis);
+        var choose = new Rectangle(x + Math.Max(760, width - 110), y + 8, 82, 32);
+        DrawButton(g, choose, "选择", true, _hoverKey == "choosePath", false);
+        _hotspots.Add((choose, "choosePath"));
+    }
+
+    private void DrawActionLine(Graphics g, int x, int y, string title, string key, string buttonText, string hint, bool danger)
+    {
+        TextRenderer.DrawText(g, title, NormalFont, new Rectangle(x, y, 160, 34), TextMain, TextFormatFlags.Left | TextFormatFlags.VerticalCenter);
+        var button = new Rectangle(x + 176, y + 1, 120, 32);
+        DrawButton(g, button, buttonText, true, _hoverKey == key, danger);
+        _hotspots.Add((button, key));
+        TextRenderer.DrawText(g, hint, NormalFont, new Rectangle(x + 320, y, Math.Max(1, Width - x - 350), 34), TextSubtle, TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis);
+    }
+
+    private void DrawInlineToggles(Graphics g, int x, int y, int width, (string Key, string Text, bool Visible)[] items)
+    {
+        var currentX = x;
+        var currentY = y;
+        foreach (var item in items)
+        {
+            var itemWidth = TextRenderer.MeasureText(item.Text + "：显示", NormalFont).Width + 34;
+            if (currentX + itemWidth > x + width && currentX > x)
+            {
+                currentX = x;
+                currentY += 38;
+            }
+
+            DrawCheckBox(g, new Rectangle(currentX, currentY + 7, 22, 22), item.Visible);
+            var rect = new Rectangle(currentX, currentY, itemWidth, 34);
+            _hotspots.Add((rect, item.Key));
+            TextRenderer.DrawText(g, item.Text + (item.Visible ? "：显示" : "：关闭"), NormalFont, new Rectangle(currentX + 30, currentY, itemWidth - 30, 34), TextMain, TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis);
+            currentX += itemWidth + 16;
+        }
+    }
+
+    private void PositionInputs()
+    {
+        var area = new Rectangle(0, 112, Math.Max(1, Width - 10), Math.Max(1, Height - 138));
+        var x = area.X + 28;
+        var y = area.Y + 20 + 40 + 46 + 46 + 82;
+        _mainHotKeyBox.SetBounds(x + 176, y + 4, 180, 28);
+        y += 56;
+        _desktopHotKeyBox.SetBounds(x + 176, y + 4, 180, 28);
+    }
+
+    protected override void OnMouseMove(MouseEventArgs e)
+    {
+        var key = _hotspots.FirstOrDefault(item => item.Rect.Contains(e.Location)).Key;
+        if (_hoverKey != key)
+        {
+            _hoverKey = key;
+            Invalidate();
+        }
+        Cursor = key is null ? Cursors.Default : Cursors.Hand;
+        base.OnMouseMove(e);
+    }
+
+    protected override void OnMouseLeave(EventArgs e)
+    {
+        _hoverKey = null;
+        Cursor = Cursors.Default;
+        Invalidate();
+        base.OnMouseLeave(e);
+    }
+
+    protected override void OnMouseClick(MouseEventArgs e)
+    {
+        if (e.Button != MouseButtons.Left)
+        {
+            base.OnMouseClick(e);
+            return;
+        }
+
+        var key = _hotspots.FirstOrDefault(item => item.Rect.Contains(e.Location)).Key;
+        switch (key)
+        {
+            case "autoStart": AutoStartChanged?.Invoke(!_autoStartProvider()); break;
+            case "startHidden": StartHiddenChanged?.Invoke(!_config.StartHiddenToTray); break;
+            case "mainSave": MainHotKeySaveRequested?.Invoke(_mainHotKeyBox.Text); break;
+            case "desktopSave": DesktopHotKeySaveRequested?.Invoke(_desktopHotKeyBox.Text); break;
+            case "choosePath": ChooseDataPathRequested?.Invoke(); break;
+            case "restore": RestoreDesktopRequested?.Invoke(); break;
+            case "export": ExportProjectsRequested?.Invoke(); break;
+            case "intro": IntroRequested?.Invoke(); break;
+            case "about": AboutRequested?.Invoke(); break;
+            case "reset": ResetRequested?.Invoke(); break;
+        }
+
+        if (key?.StartsWith("widget_", StringComparison.Ordinal) == true)
+        {
+            var widgetKey = key[7..];
+            WidgetChanged?.Invoke(widgetKey, !WidgetVisible(widgetKey));
+        }
+        else if (key?.StartsWith("hot_", StringComparison.Ordinal) == true)
+        {
+            var hotKey = key[4..];
+            DesktopHotKeyTargetChanged?.Invoke(hotKey, !HotTargetVisible(hotKey));
+        }
+
+        base.OnMouseClick(e);
+    }
+
+    private bool WidgetVisible(string key) => key switch
+    {
+        "search" => _config.DesktopSearchWidget?.Visible == true,
+        "organizer" => _config.DesktopOrganizerWidget?.Visible == true,
+        "todo" => _config.DesktopTodoWidget?.Visible == true,
+        "note" => _noteVisibleProvider(),
+        "project" => _config.DesktopProjectWidget?.Visible == true,
+        "launcher" => _config.DesktopLauncherWidget?.Visible == true,
+        "monitor" => _config.DesktopSystemMonitorWidget?.Visible == true,
+        "clipboard" => _config.DesktopClipboardWidget?.Visible == true,
+        _ => false
+    };
+
+    private bool HotTargetVisible(string key) => key switch
+    {
+        "search" => _config.DesktopHotKeyToggleSearch,
+        "organizer" => _config.DesktopHotKeyToggleOrganizer,
+        "todo" => _config.DesktopHotKeyToggleTodo,
+        "note" => _config.DesktopHotKeyToggleNote,
+        "project" => _config.DesktopHotKeyToggleProject,
+        "launcher" => _config.DesktopHotKeyToggleLauncher,
+        "monitor" => _config.DesktopHotKeyToggleSystemMonitor,
+        "clipboard" => _config.DesktopHotKeyToggleClipboard,
+        _ => false
+    };
+
+    private static TextBox CreateHotKeyBox() => new()
+    {
+        BackColor = Color.FromArgb(42, 54, 72),
+        ForeColor = TextMain,
+        BorderStyle = BorderStyle.FixedSingle,
+        Font = new Font("Microsoft YaHei UI", 9.5F)
+    };
+
+    private static void DrawButton(Graphics g, Rectangle rect, string text, bool enabled, bool hot, bool danger)
+    {
+        var fill = !enabled ? Color.FromArgb(38, 48, 62) : danger ? Color.FromArgb(180, 56, 64) : hot ? Color.FromArgb(48, 126, 255) : Accent;
+        var border = enabled ? fill : Color.FromArgb(84, 102, 126);
+        var textColor = enabled ? Color.White : Color.FromArgb(112, 126, 146);
+        DrawRoundRect(g, rect, fill, border, 6);
+        TextRenderer.DrawText(g, text, ButtonFont, rect, textColor, TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis);
+    }
+
+    private static void DrawCheckBox(Graphics g, Rectangle rect, bool isChecked)
+    {
+        DrawRoundRect(g, rect, isChecked ? Accent : Color.FromArgb(238, 245, 245, 245), isChecked ? Accent : Color.FromArgb(210, 226, 232, 240), 4);
+        if (!isChecked) return;
+        using var pen = new Pen(Color.White, 2F) { StartCap = LineCap.Round, EndCap = LineCap.Round };
+        g.DrawLine(pen, rect.X + 4, rect.Y + 10, rect.X + 8, rect.Y + 14);
+        g.DrawLine(pen, rect.X + 8, rect.Y + 14, rect.Right - 4, rect.Y + 6);
+    }
+
+    private static void DrawRoundRect(Graphics g, Rectangle rect, Color fill, Color border, int radius)
+    {
+        using var path = RoundPath(rect, radius);
+        using var brush = new SolidBrush(fill);
+        using var pen = new Pen(border);
+        g.FillPath(brush, path);
+        g.DrawPath(pen, path);
+    }
+
+    private static GraphicsPath RoundPath(Rectangle rect, int radius)
+    {
+        var path = new GraphicsPath();
+        if (rect.Width <= 1 || rect.Height <= 1 || radius <= 0)
+        {
+            path.AddRectangle(rect);
+            return path;
+        }
+        radius = Math.Min(radius, Math.Min(rect.Width, rect.Height) / 2);
+        var diameter = radius * 2;
+        rect.Width -= 1;
+        rect.Height -= 1;
+        path.AddArc(rect.Left, rect.Top, diameter, diameter, 180, 90);
+        path.AddArc(rect.Right - diameter, rect.Top, diameter, diameter, 270, 90);
+        path.AddArc(rect.Right - diameter, rect.Bottom - diameter, diameter, diameter, 0, 90);
+        path.AddArc(rect.Left, rect.Bottom - diameter, diameter, diameter, 90, 90);
+        path.CloseFigure();
+        return path;
+    }
+}
+
+internal sealed class ClipboardPageCanvas : Control
+{
+    private readonly ClipboardData _clipboard;
+    private readonly string _clipboardPath;
+    private readonly TextBox _previewText = new()
+    {
+        Multiline = true,
+        ReadOnly = true,
+        BorderStyle = BorderStyle.None,
+        ScrollBars = ScrollBars.Vertical,
+        Font = new Font("Microsoft YaHei UI", 11F)
+    };
+    private readonly List<(Rectangle Rect, string Key)> _hotspots = new();
+    private readonly List<(Rectangle Rect, ClipboardHistoryItem Item)> _itemAreas = new();
+    private ClipboardHistoryItem? _selectedItem;
+    private string? _hoverKey;
+    private ClipboardHistoryItem? _hoverItem;
+    private Image? _previewImage;
+
+    private static readonly Color Back = Color.FromArgb(22, 30, 42);
+    private static readonly Color CardFill = Color.FromArgb(118, 30, 40, 56);
+    private static readonly Color CardBorder = Color.FromArgb(72, 90, 112);
+    private static readonly Color PanelFill = Color.FromArgb(34, 44, 60);
+    private static readonly Color PanelBorder = Color.FromArgb(64, 82, 104);
+    private static readonly Color SelectedFill = Color.FromArgb(70, 104, 160, 248);
+    private static readonly Color TextMain = Color.FromArgb(238, 243, 249);
+    private static readonly Color TextSubtle = Color.FromArgb(155, 168, 186);
+    private static readonly Color Accent = Color.FromArgb(35, 107, 238);
+    private static readonly Font HeaderFont = new("Microsoft YaHei UI", 18F, FontStyle.Regular);
+    private static readonly Font GroupFont = new("Microsoft YaHei UI", 11.5F, FontStyle.Bold);
+    private static readonly Font NormalFont = new("Microsoft YaHei UI", 9.5F, FontStyle.Regular);
+    private static readonly Font ButtonFont = new("Microsoft YaHei UI", 9F, FontStyle.Regular);
+
+    public ClipboardPageCanvas(ClipboardData clipboard, string clipboardPath)
+    {
+        _clipboard = clipboard;
+        _clipboardPath = clipboardPath;
+        _previewText.BackColor = PanelFill;
+        _previewText.ForeColor = TextMain;
+        Controls.Add(_previewText);
+        SetStyle(ControlStyles.AllPaintingInWmPaint | ControlStyles.UserPaint | ControlStyles.OptimizedDoubleBuffer | ControlStyles.ResizeRedraw | ControlStyles.SupportsTransparentBackColor, true);
+    }
+
+    public event Action<ClipboardHistoryItem>? CopyRequested;
+    public event Action<ClipboardHistoryItem>? DeleteRequested;
+    public event Action? ClearRequested;
+    public event Action? RefreshRequested;
+    public event Action? PinRequested;
+
+    public void RefreshData()
+    {
+        _selectedItem = _selectedItem is not null && _clipboard.Items.Contains(_selectedItem)
+            ? _selectedItem
+            : _clipboard.Items.FirstOrDefault();
+        LoadPreviewImage();
+        UpdatePreviewText();
+        Invalidate();
+    }
+
+    protected override void Dispose(bool disposing)
+    {
+        if (disposing)
+        {
+            _previewImage?.Dispose();
+        }
+
+        base.Dispose(disposing);
+    }
+
+    protected override void OnPaint(PaintEventArgs e)
+    {
+        var g = e.Graphics;
+        g.SmoothingMode = SmoothingMode.AntiAlias;
+        _hotspots.Clear();
+        _itemAreas.Clear();
+        using (var back = new SolidBrush(Back))
+        {
+            g.FillRectangle(back, ClientRectangle);
+        }
+
+        TextRenderer.DrawText(g, "剪贴板", HeaderFont, new Rectangle(0, 0, Width, 70), TextMain, TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis);
+        DrawActions(g);
+        TextRenderer.DrawText(g, $"保存路径：{_clipboardPath}", NormalFont, new Rectangle(0, 112, Width - 20, 28), TextSubtle, TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis);
+        DrawBody(g, new Rectangle(0, 148, Math.Max(1, Width - 10), Math.Max(1, Height - 174)));
+        PositionPreviewText();
+    }
+
+    private void DrawActions(Graphics g)
+    {
+        var items = new[]
+        {
+            ("copy", "复制", _selectedItem is not null),
+            ("delete", "删除", _selectedItem is not null),
+            ("clear", "全部清除", _clipboard.Items.Count > 0),
+            ("refresh", "刷新", true),
+            ("pin", "添加到桌面", true)
+        };
+        var x = 0;
+        foreach (var item in items)
+        {
+            var width = Math.Max(64, TextRenderer.MeasureText(item.Item2, ButtonFont).Width + 24);
+            var rect = new Rectangle(x, 76, width, 34);
+            DrawButton(g, rect, item.Item2, item.Item3, _hoverKey == item.Item1);
+            _hotspots.Add((rect, item.Item1));
+            x += width + 8;
+        }
+    }
+
+    private void DrawBody(Graphics g, Rectangle rect)
+    {
+        var listWidth = Math.Min(360, Math.Max(280, rect.Width / 3));
+        var listRect = new Rectangle(rect.X, rect.Y, listWidth, rect.Height);
+        var previewRect = new Rectangle(listRect.Right + 12, rect.Y, Math.Max(1, rect.Right - listRect.Right - 12), rect.Height);
+        DrawHistory(g, listRect);
+        DrawPreview(g, previewRect);
+    }
+
+    private void DrawHistory(Graphics g, Rectangle rect)
+    {
+        DrawRoundRect(g, rect, CardFill, CardBorder, 10);
+        TextRenderer.DrawText(g, "历史记录", GroupFont, new Rectangle(rect.X + 18, rect.Y + 12, rect.Width - 36, 34), TextMain, TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis);
+        var list = new Rectangle(rect.X + 14, rect.Y + 56, rect.Width - 28, rect.Height - 70);
+        DrawRoundRect(g, list, PanelFill, PanelBorder, 8);
+        var y = list.Y + 8;
+        foreach (var item in _clipboard.Items)
+        {
+            var row = new Rectangle(list.X + 8, y, list.Width - 16, 76);
+            if (row.Bottom > list.Bottom - 8)
+            {
+                break;
+            }
+
+            DrawHistoryRow(g, row, item);
+            y += row.Height + 4;
+        }
+    }
+
+    private void DrawHistoryRow(Graphics g, Rectangle row, ClipboardHistoryItem item)
+    {
+        var selected = ReferenceEquals(item, _selectedItem);
+        DrawRoundRect(g, row, selected ? SelectedFill : ReferenceEquals(item, _hoverItem) ? Color.FromArgb(46, 58, 76) : Color.FromArgb(40, 51, 68), selected ? Color.FromArgb(130, 176, 207, 255) : PanelBorder, 6);
+        var typeRect = new Rectangle(row.X + 12, row.Y + 10, 54, 24);
+        DrawRoundRect(g, typeRect, item.Kind == ClipboardHistoryKind.Image ? Color.FromArgb(255, 190, 70) : Color.FromArgb(58, 214, 122), Color.Transparent, 5);
+        TextRenderer.DrawText(g, KindText(item), NormalFont, typeRect, Color.White, TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis);
+        TextRenderer.DrawText(g, item.CreatedAt.ToString("MM-dd HH:mm:ss"), NormalFont, new Rectangle(typeRect.Right + 10, row.Y + 9, row.Width - 80, 24), selected ? Color.White : TextSubtle, TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis);
+        TextRenderer.DrawText(g, Summary(item), NormalFont, new Rectangle(row.X + 12, row.Y + 43, row.Width - 24, 24), selected ? Color.White : TextMain, TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis);
+        _itemAreas.Add((row, item));
+    }
+
+    private void DrawPreview(Graphics g, Rectangle rect)
+    {
+        DrawRoundRect(g, rect, CardFill, CardBorder, 10);
+        TextRenderer.DrawText(g, "预览", GroupFont, new Rectangle(rect.X + 18, rect.Y + 12, rect.Width - 36, 34), TextMain, TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis);
+        var area = PreviewArea(rect);
+        DrawRoundRect(g, area, PanelFill, PanelBorder, 8);
+        if (_selectedItem is null)
+        {
+            TextRenderer.DrawText(g, "暂无剪贴板记录", NormalFont, area, TextSubtle, TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis);
+            return;
+        }
+
+        if (_selectedItem.Kind == ClipboardHistoryKind.Image)
+        {
+            _previewText.Visible = false;
+            if (_previewImage is null)
+            {
+                TextRenderer.DrawText(g, "图片数据无法读取", NormalFont, area, TextSubtle, TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis);
+            }
+            else
+            {
+                var target = FitImage(_previewImage, new Rectangle(area.X + 16, area.Y + 16, area.Width - 32, area.Height - 56));
+                g.DrawImage(_previewImage, target);
+            }
+        }
+        else
+        {
+            _previewText.Visible = true;
+        }
+
+        TextRenderer.DrawText(g, $"{KindText(_selectedItem)} · {_selectedItem.CreatedAt:yyyy-MM-dd HH:mm:ss}", NormalFont, new Rectangle(area.X + 16, area.Bottom - 34, area.Width - 32, 24), TextSubtle, TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis);
+    }
+
+    private void PositionPreviewText()
+    {
+        var body = new Rectangle(0, 148, Math.Max(1, Width - 10), Math.Max(1, Height - 174));
+        var listWidth = Math.Min(360, Math.Max(280, body.Width / 3));
+        var previewRect = new Rectangle(body.X + listWidth + 12, body.Y, Math.Max(1, body.Right - body.X - listWidth - 12), body.Height);
+        var area = PreviewArea(previewRect);
+        _previewText.Bounds = new Rectangle(area.X + 16, area.Y + 16, area.Width - 32, area.Height - 56);
+        _previewText.BackColor = PanelFill;
+    }
+
+    private static Rectangle PreviewArea(Rectangle rect) => new(rect.X + 14, rect.Y + 56, rect.Width - 28, rect.Height - 70);
+
+    protected override void OnMouseMove(MouseEventArgs e)
+    {
+        var key = _hotspots.FirstOrDefault(item => item.Rect.Contains(e.Location)).Key;
+        var item = _itemAreas.FirstOrDefault(area => area.Rect.Contains(e.Location)).Item;
+        if (_hoverKey != key || !ReferenceEquals(_hoverItem, item))
+        {
+            _hoverKey = key;
+            _hoverItem = item;
+            Invalidate();
+        }
+
+        Cursor = key is not null || item is not null ? Cursors.Hand : Cursors.Default;
+        base.OnMouseMove(e);
+    }
+
+    protected override void OnMouseLeave(EventArgs e)
+    {
+        _hoverKey = null;
+        _hoverItem = null;
+        Cursor = Cursors.Default;
+        Invalidate();
+        base.OnMouseLeave(e);
+    }
+
+    protected override void OnMouseClick(MouseEventArgs e)
+    {
+        if (e.Button != MouseButtons.Left)
+        {
+            base.OnMouseClick(e);
+            return;
+        }
+
+        var item = _itemAreas.FirstOrDefault(area => area.Rect.Contains(e.Location)).Item;
+        if (item is not null)
+        {
+            _selectedItem = item;
+            LoadPreviewImage();
+            UpdatePreviewText();
+            Invalidate();
+            return;
+        }
+
+        switch (_hotspots.FirstOrDefault(hotspot => hotspot.Rect.Contains(e.Location)).Key)
+        {
+            case "copy" when _selectedItem is not null:
+                CopyRequested?.Invoke(_selectedItem);
+                break;
+            case "delete" when _selectedItem is not null:
+                DeleteRequested?.Invoke(_selectedItem);
+                break;
+            case "clear":
+                ClearRequested?.Invoke();
+                break;
+            case "refresh":
+                RefreshRequested?.Invoke();
+                break;
+            case "pin":
+                PinRequested?.Invoke();
+                break;
+        }
+
+        base.OnMouseClick(e);
+    }
+
+    protected override void OnMouseDoubleClick(MouseEventArgs e)
+    {
+        var item = _itemAreas.FirstOrDefault(area => area.Rect.Contains(e.Location)).Item;
+        if (item is not null)
+        {
+            _selectedItem = item;
+            CopyRequested?.Invoke(item);
+        }
+
+        base.OnMouseDoubleClick(e);
+    }
+
+    private void UpdatePreviewText()
+    {
+        _previewText.Text = _selectedItem?.Kind == ClipboardHistoryKind.Text ? _selectedItem.Text ?? string.Empty : string.Empty;
+        _previewText.Visible = _selectedItem?.Kind == ClipboardHistoryKind.Text;
+    }
+
+    private void LoadPreviewImage()
+    {
+        _previewImage?.Dispose();
+        _previewImage = _selectedItem?.Kind == ClipboardHistoryKind.Image ? DecodeImage(_selectedItem) : null;
+    }
+
+    private static string KindText(ClipboardHistoryItem item) => item.Kind == ClipboardHistoryKind.Image ? "图片" : "文字";
+
+    private static string Summary(ClipboardHistoryItem item)
+    {
+        if (item.Kind == ClipboardHistoryKind.Image)
+        {
+            using var image = DecodeImage(item);
+            return image is null ? "图片" : $"{image.Width} x {image.Height} 图片";
+        }
+
+        var text = (item.Text ?? string.Empty).Replace("\r", " ").Replace("\n", " ").Trim();
+        return string.IsNullOrWhiteSpace(text) ? "空白文字" : text;
+    }
+
+    private static Image? DecodeImage(ClipboardHistoryItem item)
+    {
+        if (string.IsNullOrWhiteSpace(item.ImagePngBase64))
+        {
+            return null;
+        }
+
+        try
+        {
+            var bytes = Convert.FromBase64String(item.ImagePngBase64);
+            using var stream = new MemoryStream(bytes);
+            using var image = Image.FromStream(stream);
+            return new Bitmap(image);
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
+    private static Rectangle FitImage(Image image, Rectangle area)
+    {
+        var scale = Math.Min(area.Width / (float)image.Width, area.Height / (float)image.Height);
+        var width = Math.Max(1, (int)(image.Width * scale));
+        var height = Math.Max(1, (int)(image.Height * scale));
+        return new Rectangle(area.X + (area.Width - width) / 2, area.Y + (area.Height - height) / 2, width, height);
+    }
+
+    private static void DrawButton(Graphics g, Rectangle rect, string text, bool enabled, bool hot)
+    {
+        var fill = !enabled ? Color.FromArgb(38, 48, 62) : hot ? Color.FromArgb(48, 126, 255) : Accent;
+        var border = enabled ? fill : Color.FromArgb(84, 102, 126);
+        var textColor = enabled ? Color.White : Color.FromArgb(112, 126, 146);
+        DrawRoundRect(g, rect, fill, border, 6);
+        TextRenderer.DrawText(g, text, ButtonFont, rect, textColor, TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis);
+    }
+
+    private static void DrawRoundRect(Graphics g, Rectangle rect, Color fill, Color border, int radius)
+    {
+        using var path = RoundPath(rect, radius);
+        using var brush = new SolidBrush(fill);
+        using var pen = new Pen(border);
+        g.FillPath(brush, path);
+        if (border.A > 0)
+        {
+            g.DrawPath(pen, path);
+        }
+    }
+
+    private static GraphicsPath RoundPath(Rectangle rect, int radius)
+    {
+        var path = new GraphicsPath();
+        var diameter = radius * 2;
+        rect.Width -= 1;
+        rect.Height -= 1;
+        path.AddArc(rect.Left, rect.Top, diameter, diameter, 180, 90);
+        path.AddArc(rect.Right - diameter, rect.Top, diameter, diameter, 270, 90);
+        path.AddArc(rect.Right - diameter, rect.Bottom - diameter, diameter, diameter, 0, 90);
+        path.AddArc(rect.Left, rect.Bottom - diameter, diameter, diameter, 90, 90);
+        path.CloseFigure();
+        return path;
+    }
+}
+internal sealed class SearchSettingsCanvas : Control
+{
+    private readonly AppConfig _config;
+    private readonly Func<string> _customHintProvider;
+    private readonly List<(Rectangle Rect, string Key)> _hotspots = new();
+    private string? _hoverKey;
+
+    private static readonly Color Back = Color.FromArgb(22, 30, 42);
+    private static readonly Color CardFill = Color.FromArgb(118, 30, 40, 56);
+    private static readonly Color CardBorder = Color.FromArgb(72, 90, 112);
+    private static readonly Color TextMain = Color.FromArgb(238, 243, 249);
+    private static readonly Color TextSubtle = Color.FromArgb(155, 168, 186);
+    private static readonly Color Accent = Color.FromArgb(35, 107, 238);
+    private static readonly Font HeaderFont = new("Microsoft YaHei UI", 18F, FontStyle.Regular);
+    private static readonly Font SectionFont = new("Microsoft YaHei UI", 11.5F, FontStyle.Regular);
+    private static readonly Font NormalFont = new("Microsoft YaHei UI", 9.5F, FontStyle.Regular);
+    private static readonly Font ButtonFont = new("Microsoft YaHei UI", 9F, FontStyle.Regular);
+
+    public SearchSettingsCanvas(AppConfig config, Func<string> customHintProvider)
+    {
+        _config = config;
+        _customHintProvider = customHintProvider;
+        SetStyle(ControlStyles.AllPaintingInWmPaint | ControlStyles.UserPaint | ControlStyles.OptimizedDoubleBuffer | ControlStyles.ResizeRedraw | ControlStyles.SupportsTransparentBackColor, true);
+    }
+
+    public event Action? PinRequested;
+    public event Action? OpenRequested;
+    public event Action? SettingChanged;
+    public event Action? AddCustomPathRequested;
+    public event Action? ClearCustomPathsRequested;
+
+    public void RefreshData() => Invalidate();
+
+    protected override void OnPaint(PaintEventArgs e)
+    {
+        var g = e.Graphics;
+        g.SmoothingMode = SmoothingMode.AntiAlias;
+        _hotspots.Clear();
+        using (var back = new SolidBrush(Back))
+        {
+            g.FillRectangle(back, ClientRectangle);
+        }
+
+        TextRenderer.DrawText(g, "搜索设置", HeaderFont, new Rectangle(0, 0, Width, 70), TextMain, TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis);
+        DrawTopActions(g);
+        DrawSettings(g, new Rectangle(0, 122, Math.Max(1, Width - 10), Math.Max(1, Height - 148)));
+    }
+
+    private void DrawTopActions(Graphics g)
+    {
+        var x = 0;
+        foreach (var item in new[] { ("pin", "添加到桌面"), ("open", "打开搜索") })
+        {
+            var width = Math.Max(92, TextRenderer.MeasureText(item.Item2, ButtonFont).Width + 24);
+            var rect = new Rectangle(x, 76, width, 34);
+            DrawButton(g, rect, item.Item2, true, _hoverKey == item.Item1);
+            _hotspots.Add((rect, item.Item1));
+            x += width + 8;
+        }
+    }
+
+    private void DrawSettings(Graphics g, Rectangle rect)
+    {
+        DrawRoundRect(g, rect, CardFill, CardBorder, 10);
+        TextRenderer.DrawText(g, "搜索方式", SectionFont, new Rectangle(rect.X + 28, rect.Y + 24, rect.Width - 56, 36), TextMain, TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis);
+        var y = rect.Y + 76;
+        DrawToggleRow(g, rect.X + 28, y, "app", "应用内数据", "快捷启动、桌面分类、工作记录、便签、项目条目", SearchEnabled(_config.SearchAppData)); y += 64;
+        DrawToggleRow(g, rect.X + 28, y, "desktop", "桌面文件", "系统桌面和桌面收纳中的文件、文件夹", SearchEnabled(_config.SearchDesktopFiles)); y += 64;
+        DrawToggleRow(g, rect.X + 28, y, "start", "开始菜单应用", "开始菜单、公共开始菜单和快捷启动路径", SearchEnabled(_config.SearchStartMenuApps)); y += 64;
+        DrawToggleRow(g, rect.X + 28, y, "project", "项目路径", "项目、阶段、子任务关联的文件夹和文件", SearchEnabled(_config.SearchProjectPaths)); y += 64;
+        DrawCustomPathRow(g, rect.X + 28, y, rect.Width - 56); y += 64;
+        DrawToggleRow(g, rect.X + 28, y, "transparent", "透明配色", "桌面搜索组件使用半透明深色配色", _config.DesktopSearchWidgetTransparent); y += 82;
+        TextRenderer.DrawText(g, "桌面组件", NormalFont, new Rectangle(rect.X + 48, y, 150, 34), TextMain, TextFormatFlags.Left | TextFormatFlags.VerticalCenter);
+        TextRenderer.DrawText(g, "点击上方“添加到桌面”会显示胶囊搜索框", NormalFont, new Rectangle(rect.X + 210, y, rect.Width - 260, 34), TextSubtle, TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis);
+    }
+
+    private void DrawToggleRow(Graphics g, int x, int y, string key, string title, string detail, bool enabled)
+    {
+        TextRenderer.DrawText(g, title, NormalFont, new Rectangle(x, y, 150, 34), TextMain, TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis);
+        var toggle = new Rectangle(x + 166, y + 7, 22, 22);
+        DrawCheckBox(g, toggle, enabled);
+        _hotspots.Add((new Rectangle(x + 158, y, 112, 34), key));
+        TextRenderer.DrawText(g, enabled ? "已开启" : "已关闭", NormalFont, new Rectangle(x + 196, y, 76, 34), TextMain, TextFormatFlags.Left | TextFormatFlags.VerticalCenter);
+        TextRenderer.DrawText(g, detail, NormalFont, new Rectangle(x + 300, y, Math.Max(1, Width - x - 330), 34), TextSubtle, TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis);
+    }
+
+    private void DrawCustomPathRow(Graphics g, int x, int y, int width)
+    {
+        TextRenderer.DrawText(g, "其他位置", NormalFont, new Rectangle(x, y, 150, 34), TextMain, TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis);
+        var enabled = SearchEnabled(_config.SearchCustomPaths);
+        DrawCheckBox(g, new Rectangle(x + 166, y + 7, 22, 22), enabled);
+        _hotspots.Add((new Rectangle(x + 158, y, 112, 34), "custom"));
+        TextRenderer.DrawText(g, enabled ? "已开启" : "已关闭", NormalFont, new Rectangle(x + 196, y, 76, 34), TextMain, TextFormatFlags.Left | TextFormatFlags.VerticalCenter);
+        TextRenderer.DrawText(g, _customHintProvider(), NormalFont, new Rectangle(x + 300, y, Math.Max(1, width - 560), 34), TextSubtle, TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis);
+        var add = new Rectangle(x + Math.Max(570, width - 280), y + 1, 104, 32);
+        var clear = new Rectangle(add.Right + 12, y + 1, 74, 32);
+        DrawButton(g, add, "添加文件", true, _hoverKey == "addCustom");
+        DrawButton(g, clear, "清空", true, _hoverKey == "clearCustom");
+        _hotspots.Add((add, "addCustom"));
+        _hotspots.Add((clear, "clearCustom"));
+    }
+
+    protected override void OnMouseMove(MouseEventArgs e)
+    {
+        var key = _hotspots.FirstOrDefault(item => item.Rect.Contains(e.Location)).Key;
+        if (_hoverKey != key)
+        {
+            _hoverKey = key;
+            Invalidate();
+        }
+
+        Cursor = key is null ? Cursors.Default : Cursors.Hand;
+        base.OnMouseMove(e);
+    }
+
+    protected override void OnMouseLeave(EventArgs e)
+    {
+        _hoverKey = null;
+        Cursor = Cursors.Default;
+        Invalidate();
+        base.OnMouseLeave(e);
+    }
+
+    protected override void OnMouseClick(MouseEventArgs e)
+    {
+        if (e.Button != MouseButtons.Left)
+        {
+            base.OnMouseClick(e);
+            return;
+        }
+
+        switch (_hotspots.FirstOrDefault(item => item.Rect.Contains(e.Location)).Key)
+        {
+            case "pin": PinRequested?.Invoke(); break;
+            case "open": OpenRequested?.Invoke(); break;
+            case "app": _config.SearchAppData = !SearchEnabled(_config.SearchAppData); SettingChanged?.Invoke(); break;
+            case "desktop": _config.SearchDesktopFiles = !SearchEnabled(_config.SearchDesktopFiles); SettingChanged?.Invoke(); break;
+            case "start": _config.SearchStartMenuApps = !SearchEnabled(_config.SearchStartMenuApps); SettingChanged?.Invoke(); break;
+            case "project": _config.SearchProjectPaths = !SearchEnabled(_config.SearchProjectPaths); SettingChanged?.Invoke(); break;
+            case "custom": _config.SearchCustomPaths = !SearchEnabled(_config.SearchCustomPaths); SettingChanged?.Invoke(); break;
+            case "transparent": _config.DesktopSearchWidgetTransparent = !_config.DesktopSearchWidgetTransparent; SettingChanged?.Invoke(); break;
+            case "addCustom": AddCustomPathRequested?.Invoke(); break;
+            case "clearCustom": ClearCustomPathsRequested?.Invoke(); break;
+        }
+
+        base.OnMouseClick(e);
+    }
+
+    private static bool SearchEnabled(bool? value) => value ?? true;
+
+    private static void DrawButton(Graphics g, Rectangle rect, string text, bool enabled, bool hot)
+    {
+        var fill = !enabled ? Color.FromArgb(38, 48, 62) : hot ? Color.FromArgb(48, 126, 255) : Accent;
+        var border = enabled ? fill : Color.FromArgb(84, 102, 126);
+        var textColor = enabled ? Color.White : Color.FromArgb(112, 126, 146);
+        DrawRoundRect(g, rect, fill, border, 6);
+        TextRenderer.DrawText(g, text, ButtonFont, rect, textColor, TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis);
+    }
+
+    private static void DrawCheckBox(Graphics g, Rectangle rect, bool isChecked)
+    {
+        DrawRoundRect(g, rect, isChecked ? Accent : Color.FromArgb(38, 48, 62), isChecked ? Accent : Color.FromArgb(84, 102, 126), 4);
+        if (!isChecked) return;
+        using var pen = new Pen(Color.White, 2F) { StartCap = LineCap.Round, EndCap = LineCap.Round };
+        g.DrawLine(pen, rect.X + 4, rect.Y + 10, rect.X + 8, rect.Y + 14);
+        g.DrawLine(pen, rect.X + 8, rect.Y + 14, rect.Right - 4, rect.Y + 6);
+    }
+
+    private static void DrawRoundRect(Graphics g, Rectangle rect, Color fill, Color border, int radius)
+    {
+        using var path = RoundPath(rect, radius);
+        using var brush = new SolidBrush(fill);
+        using var pen = new Pen(border);
+        g.FillPath(brush, path);
+        g.DrawPath(pen, path);
+    }
+
+    private static GraphicsPath RoundPath(Rectangle rect, int radius)
+    {
+        var path = new GraphicsPath();
+        var diameter = radius * 2;
+        rect.Width -= 1;
+        rect.Height -= 1;
+        path.AddArc(rect.Left, rect.Top, diameter, diameter, 180, 90);
+        path.AddArc(rect.Right - diameter, rect.Top, diameter, diameter, 270, 90);
+        path.AddArc(rect.Right - diameter, rect.Bottom - diameter, diameter, diameter, 0, 90);
+        path.AddArc(rect.Left, rect.Bottom - diameter, diameter, diameter, 90, 90);
+        path.CloseFigure();
+        return path;
+    }
+}
+internal sealed class ProjectPageCanvas : Control
+{
+    private readonly ProjectData _projects;
+    private readonly List<(Rectangle Rect, string Key)> _hotspots = new();
+    private readonly List<(Rectangle Rect, ProjectBoard Project)> _projectAreas = new();
+    private readonly List<(Rectangle Rect, ProjectItem Item)> _itemAreas = new();
+    private readonly List<(Rectangle Rect, Rectangle CheckRect, ProjectSubItem SubItem)> _subItemAreas = new();
+    private ProjectBoard? _selectedProject;
+    private ProjectItem? _selectedItem;
+    private ProjectSubItem? _selectedSubItem;
+    private string? _hoverKey;
+    private object? _hoverObject;
+
+    private static readonly Color Back = Color.FromArgb(22, 30, 42);
+    private static readonly Color CardFill = Color.FromArgb(118, 30, 40, 56);
+    private static readonly Color CardBorder = Color.FromArgb(72, 90, 112);
+    private static readonly Color PanelFill = Color.FromArgb(34, 44, 60);
+    private static readonly Color PanelBorder = Color.FromArgb(64, 82, 104);
+    private static readonly Color SelectedFill = Color.FromArgb(70, 104, 160, 248);
+    private static readonly Color TextMain = Color.FromArgb(238, 243, 249);
+    private static readonly Color TextSubtle = Color.FromArgb(155, 168, 186);
+    private static readonly Color Accent = Color.FromArgb(35, 107, 238);
+    private static readonly Color ProgressGreen = Color.FromArgb(58, 214, 122);
+    private static readonly Font HeaderFont = new("Microsoft YaHei UI", 18F, FontStyle.Regular);
+    private static readonly Font GroupFont = new("Microsoft YaHei UI", 11.5F, FontStyle.Bold);
+    private static readonly Font NormalFont = new("Microsoft YaHei UI", 9.5F, FontStyle.Regular);
+    private static readonly Font SmallFont = new("Microsoft YaHei UI", 8.5F, FontStyle.Regular);
+    private static readonly Font ButtonFont = new("Microsoft YaHei UI", 9F, FontStyle.Regular);
+
+    public ProjectPageCanvas(ProjectData projects)
+    {
+        _projects = projects;
+        SetStyle(ControlStyles.AllPaintingInWmPaint | ControlStyles.UserPaint | ControlStyles.OptimizedDoubleBuffer | ControlStyles.ResizeRedraw | ControlStyles.SupportsTransparentBackColor, true);
+    }
+
+    public event Action? AddProjectRequested;
+    public event Action<ProjectBoard>? RenameProjectRequested;
+    public event Action<ProjectBoard>? DeleteProjectRequested;
+    public event Action<ProjectBoard>? SetProjectPathRequested;
+    public event Action? PinProjectRequested;
+    public event Action<ProjectBoard>? AddItemRequested;
+    public event Action<ProjectItem>? EditItemRequested;
+    public event Action<ProjectBoard, ProjectItem>? DeleteItemRequested;
+    public event Action<ProjectItem>? SetItemPathRequested;
+    public event Action<ProjectItem>? AddSubItemRequested;
+    public event Action<ProjectSubItem>? EditSubItemRequested;
+    public event Action<ProjectItem, ProjectSubItem>? DeleteSubItemRequested;
+    public event Action<ProjectSubItem>? SetSubItemPathRequested;
+    public event Action<ProjectSubItem>? SubItemDoneChanged;
+    public event Action<string>? OpenPathRequested;
+
+    public void RefreshData(ProjectBoard? project = null, ProjectItem? item = null, ProjectSubItem? subItem = null)
+    {
+        _selectedProject = project is not null && _projects.Projects.Contains(project)
+            ? project
+            : _selectedProject is not null && _projects.Projects.Contains(_selectedProject)
+                ? _selectedProject
+                : _projects.Projects.FirstOrDefault();
+        _selectedItem = item is not null && _selectedProject?.Items.Contains(item) == true
+            ? item
+            : _selectedItem is not null && _selectedProject?.Items.Contains(_selectedItem) == true
+                ? _selectedItem
+                : _selectedProject?.Items.FirstOrDefault();
+        _selectedSubItem = subItem is not null && _selectedItem?.SubItems.Contains(subItem) == true
+            ? subItem
+            : _selectedSubItem is not null && _selectedItem?.SubItems.Contains(_selectedSubItem) == true
+                ? _selectedSubItem
+                : _selectedItem?.SubItems.FirstOrDefault();
+        Invalidate();
+    }
+
+    protected override void OnPaint(PaintEventArgs e)
+    {
+        var g = e.Graphics;
+        g.SmoothingMode = SmoothingMode.AntiAlias;
+        _hotspots.Clear();
+        _projectAreas.Clear();
+        _itemAreas.Clear();
+        _subItemAreas.Clear();
+
+        using (var back = new SolidBrush(Back))
+        {
+            g.FillRectangle(back, ClientRectangle);
+        }
+
+        TextRenderer.DrawText(g, "项目管理", HeaderFont, new Rectangle(0, 0, Width, 70), TextMain, TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis);
+        DrawTopActions(g);
+        DrawColumns(g);
+    }
+
+    private void DrawTopActions(Graphics g)
+    {
+        var items = new[]
+        {
+            ("addProject", "新建项目", true),
+            ("renameProject", "重命名项目", _selectedProject is not null),
+            ("deleteProject", "删除项目", _selectedProject is not null),
+            ("pathProject", "添加项目路径", _selectedProject is not null),
+            ("pinProject", "添加到桌面", true)
+        };
+        var x = 0;
+        foreach (var item in items)
+        {
+            var width = Math.Max(80, TextRenderer.MeasureText(item.Item2, ButtonFont).Width + 24);
+            var rect = new Rectangle(x, 76, width, 34);
+            DrawButton(g, rect, item.Item2, item.Item3, _hoverKey == item.Item1);
+            _hotspots.Add((rect, item.Item1));
+            x += width + 8;
+        }
+    }
+
+    private void DrawColumns(Graphics g)
+    {
+        var area = new Rectangle(0, 122, Math.Max(1, Width - 10), Math.Max(1, Height - 148));
+        const int gap = 12;
+        var projectWidth = 210;
+        var subWidth = Math.Max(300, (int)(area.Width * 0.34));
+        var itemWidth = Math.Max(360, area.Width - projectWidth - subWidth - gap * 2);
+        var projectRect = new Rectangle(area.X, area.Y, projectWidth, area.Height);
+        var itemRect = new Rectangle(projectRect.Right + gap, area.Y, itemWidth, area.Height);
+        var subRect = new Rectangle(itemRect.Right + gap, area.Y, Math.Max(1, area.Right - itemRect.Right - gap), area.Height);
+        DrawProjects(g, projectRect);
+        DrawItems(g, itemRect);
+        DrawSubItems(g, subRect);
+    }
+
+    private void DrawProjects(Graphics g, Rectangle rect)
+    {
+        DrawRoundRect(g, rect, CardFill, CardBorder, 10);
+        TextRenderer.DrawText(g, "项目", GroupFont, new Rectangle(rect.X + 18, rect.Y + 12, rect.Width - 36, 34), TextMain, TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis);
+        var list = new Rectangle(rect.X + 14, rect.Y + 56, rect.Width - 28, rect.Height - 70);
+        DrawRoundRect(g, list, PanelFill, PanelBorder, 8);
+        var y = list.Y + 8;
+        foreach (var project in _projects.Projects)
+        {
+            var row = new Rectangle(list.X + 8, y, list.Width - 16, 48);
+            if (row.Bottom > list.Bottom - 8)
+            {
+                break;
+            }
+
+            var selected = ReferenceEquals(project, _selectedProject);
+            DrawRoundRect(g, row, selected ? SelectedFill : ReferenceEquals(project, _hoverObject) ? Color.FromArgb(46, 58, 76) : Color.FromArgb(40, 51, 68), selected ? Color.FromArgb(130, 176, 207, 255) : PanelBorder, 7);
+            TextRenderer.DrawText(g, project.Name, NormalFont, row, TextMain, TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis);
+            _projectAreas.Add((row, project));
+            y += row.Height + 8;
+        }
+    }
+
+    private void DrawItems(Graphics g, Rectangle rect)
+    {
+        DrawRoundRect(g, rect, CardFill, CardBorder, 10);
+        TextRenderer.DrawText(g, "项目阶段", GroupFont, new Rectangle(rect.X + 18, rect.Y + 12, rect.Width - 36, 34), TextMain, TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis);
+        var list = new Rectangle(rect.X + 14, rect.Y + 56, rect.Width - 28, rect.Height - 112);
+        DrawRoundRect(g, list, PanelFill, PanelBorder, 8);
+        var y = list.Y + 8;
+        foreach (var item in _selectedProject?.Items ?? Enumerable.Empty<ProjectItem>())
+        {
+            var row = new Rectangle(list.X + 8, y, list.Width - 16, 92);
+            if (row.Bottom > list.Bottom - 8)
+            {
+                break;
+            }
+
+            DrawProjectItem(g, row, item);
+            y += row.Height + 8;
+        }
+
+        DrawFooterButtons(g, rect, new[]
+        {
+            ("addItem", "新增", _selectedProject is not null),
+            ("editItem", "编辑", _selectedItem is not null),
+            ("deleteItem", "删除", _selectedItem is not null),
+            ("pathItem", "添加路径", _selectedItem is not null)
+        });
+    }
+
+    private void DrawProjectItem(Graphics g, Rectangle row, ProjectItem item)
+    {
+        var selected = ReferenceEquals(item, _selectedItem);
+        DrawRoundRect(g, row, selected ? SelectedFill : ReferenceEquals(item, _hoverObject) ? Color.FromArgb(46, 58, 76) : Color.FromArgb(40, 51, 68), selected ? Color.FromArgb(130, 176, 207, 255) : PanelBorder, 7);
+        var content = new Rectangle(row.X + 16, row.Y + 10, row.Width - 32, row.Height - 18);
+        var percent = ProgressPercent(item);
+        TextRenderer.DrawText(g, item.Title, NormalFont, new Rectangle(content.X, content.Y, content.Width - 72, 26), TextMain, TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis);
+        TextRenderer.DrawText(g, $"{percent}%", NormalFont, new Rectangle(content.Right - 68, content.Y, 68, 26), TextMain, TextFormatFlags.Right | TextFormatFlags.VerticalCenter);
+        TextRenderer.DrawText(g, DateRangeText(item), NormalFont, new Rectangle(content.X, content.Y + 30, content.Width, 24), TextSubtle, TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis);
+        var track = new Rectangle(content.X, content.Bottom - 14, content.Width, 8);
+        using var trackBrush = new SolidBrush(Color.FromArgb(67, 80, 104));
+        g.FillRectangle(trackBrush, track);
+        if (percent > 0)
+        {
+            using var fillBrush = new SolidBrush(ProgressGreen);
+            g.FillRectangle(fillBrush, new Rectangle(track.X, track.Y, Math.Max(8, track.Width * percent / 100), track.Height));
+        }
+
+        if (item.SubItems.Count > 1)
+        {
+            using var tickPen = new Pen(Color.FromArgb(154, 176, 198), 1F);
+            for (var i = 1; i < item.SubItems.Count; i++)
+            {
+                var x = track.X + track.Width * i / item.SubItems.Count;
+                g.DrawLine(tickPen, x, track.Y - 2, x, track.Bottom + 2);
+            }
+        }
+
+        var thumbX = track.X + track.Width * percent / 100;
+        using var thumb = new SolidBrush(Color.White);
+        g.FillEllipse(thumb, new Rectangle(thumbX - 5, track.Y - 4, 11, 15));
+        _itemAreas.Add((row, item));
+    }
+
+    private void DrawSubItems(Graphics g, Rectangle rect)
+    {
+        DrawRoundRect(g, rect, CardFill, CardBorder, 10);
+        TextRenderer.DrawText(g, "文件或事件预设", GroupFont, new Rectangle(rect.X + 18, rect.Y + 12, rect.Width - 36, 34), TextMain, TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis);
+        var list = new Rectangle(rect.X + 14, rect.Y + 56, rect.Width - 28, rect.Height - 112);
+        DrawRoundRect(g, list, PanelFill, PanelBorder, 8);
+        var y = list.Y + 8;
+        foreach (var subItem in _selectedItem?.SubItems ?? Enumerable.Empty<ProjectSubItem>())
+        {
+            var row = new Rectangle(list.X + 8, y, list.Width - 16, 44);
+            if (row.Bottom > list.Bottom - 8)
+            {
+                break;
+            }
+
+            var selected = ReferenceEquals(subItem, _selectedSubItem);
+            DrawRoundRect(g, row, selected ? SelectedFill : ReferenceEquals(subItem, _hoverObject) ? Color.FromArgb(46, 58, 76) : Color.FromArgb(40, 51, 68), selected ? Color.FromArgb(130, 176, 207, 255) : PanelBorder, 7);
+            var check = new Rectangle(row.X + 12, row.Y + 13, 18, 18);
+            DrawCheckBox(g, check, subItem.Done);
+            var suffix = string.IsNullOrWhiteSpace(subItem.FilePath) ? "" : "  已设置文件";
+            TextRenderer.DrawText(g, (string.IsNullOrWhiteSpace(subItem.Title) ? "未命名" : subItem.Title) + suffix, NormalFont, new Rectangle(row.X + 40, row.Y, row.Width - 52, row.Height), TextMain, TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis);
+            _subItemAreas.Add((row, check, subItem));
+            y += row.Height + 8;
+        }
+
+        DrawFooterButtons(g, rect, new[]
+        {
+            ("addSub", "新增", _selectedItem is not null),
+            ("editSub", "编辑", _selectedSubItem is not null),
+            ("deleteSub", "删除", _selectedSubItem is not null),
+            ("pathSub", "添加文件", _selectedSubItem is not null)
+        });
+    }
+
+    private void DrawFooterButtons(Graphics g, Rectangle rect, (string Key, string Text, bool Enabled)[] buttons)
+    {
+        var x = rect.X + 18;
+        var y = rect.Bottom - 48;
+        foreach (var button in buttons)
+        {
+            var width = Math.Max(64, TextRenderer.MeasureText(button.Text, ButtonFont).Width + 24);
+            var buttonRect = new Rectangle(x, y, width, 32);
+            DrawButton(g, buttonRect, button.Text, button.Enabled, _hoverKey == button.Key);
+            _hotspots.Add((buttonRect, button.Key));
+            x += width + 8;
+        }
+    }
+
+    protected override void OnMouseMove(MouseEventArgs e)
+    {
+        var key = _hotspots.FirstOrDefault(item => item.Rect.Contains(e.Location)).Key;
+        object? obj = _projectAreas.FirstOrDefault(area => area.Rect.Contains(e.Location)).Project
+            ?? (object?)_itemAreas.FirstOrDefault(area => area.Rect.Contains(e.Location)).Item
+            ?? _subItemAreas.FirstOrDefault(area => area.Rect.Contains(e.Location)).SubItem;
+        if (_hoverKey != key || !ReferenceEquals(_hoverObject, obj))
+        {
+            _hoverKey = key;
+            _hoverObject = obj;
+            Invalidate();
+        }
+
+        Cursor = key is not null || obj is not null ? Cursors.Hand : Cursors.Default;
+        base.OnMouseMove(e);
+    }
+
+    protected override void OnMouseLeave(EventArgs e)
+    {
+        _hoverKey = null;
+        _hoverObject = null;
+        Cursor = Cursors.Default;
+        Invalidate();
+        base.OnMouseLeave(e);
+    }
+
+    protected override void OnMouseClick(MouseEventArgs e)
+    {
+        if (e.Button != MouseButtons.Left)
+        {
+            base.OnMouseClick(e);
+            return;
+        }
+
+        var project = _projectAreas.FirstOrDefault(area => area.Rect.Contains(e.Location)).Project;
+        if (project is not null)
+        {
+            _selectedProject = project;
+            _selectedItem = project.Items.FirstOrDefault();
+            _selectedSubItem = _selectedItem?.SubItems.FirstOrDefault();
+            Invalidate();
+            return;
+        }
+
+        var item = _itemAreas.FirstOrDefault(area => area.Rect.Contains(e.Location)).Item;
+        if (item is not null)
+        {
+            _selectedItem = item;
+            _selectedSubItem = item.SubItems.FirstOrDefault();
+            Invalidate();
+            return;
+        }
+
+        var subHit = _subItemAreas.FirstOrDefault(area => area.Rect.Contains(e.Location));
+        if (subHit.SubItem is not null)
+        {
+            _selectedSubItem = subHit.SubItem;
+            if (subHit.CheckRect.Contains(e.Location))
+            {
+                subHit.SubItem.Done = !subHit.SubItem.Done;
+                SubItemDoneChanged?.Invoke(subHit.SubItem);
+            }
+            else if (!string.IsNullOrWhiteSpace(subHit.SubItem.FilePath))
+            {
+                OpenPathRequested?.Invoke(subHit.SubItem.FilePath);
+            }
+
+            Invalidate();
+            return;
+        }
+
+        HandleAction(_hotspots.FirstOrDefault(hotspot => hotspot.Rect.Contains(e.Location)).Key);
+        base.OnMouseClick(e);
+    }
+
+    private void HandleAction(string? key)
+    {
+        switch (key)
+        {
+            case "addProject":
+                AddProjectRequested?.Invoke();
+                break;
+            case "renameProject" when _selectedProject is not null:
+                RenameProjectRequested?.Invoke(_selectedProject);
+                break;
+            case "deleteProject" when _selectedProject is not null:
+                DeleteProjectRequested?.Invoke(_selectedProject);
+                break;
+            case "pathProject" when _selectedProject is not null:
+                SetProjectPathRequested?.Invoke(_selectedProject);
+                break;
+            case "pinProject":
+                PinProjectRequested?.Invoke();
+                break;
+            case "addItem" when _selectedProject is not null:
+                AddItemRequested?.Invoke(_selectedProject);
+                break;
+            case "editItem" when _selectedItem is not null:
+                EditItemRequested?.Invoke(_selectedItem);
+                break;
+            case "deleteItem" when _selectedProject is not null && _selectedItem is not null:
+                DeleteItemRequested?.Invoke(_selectedProject, _selectedItem);
+                break;
+            case "pathItem" when _selectedItem is not null:
+                SetItemPathRequested?.Invoke(_selectedItem);
+                break;
+            case "addSub" when _selectedItem is not null:
+                AddSubItemRequested?.Invoke(_selectedItem);
+                break;
+            case "editSub" when _selectedSubItem is not null:
+                EditSubItemRequested?.Invoke(_selectedSubItem);
+                break;
+            case "deleteSub" when _selectedItem is not null && _selectedSubItem is not null:
+                DeleteSubItemRequested?.Invoke(_selectedItem, _selectedSubItem);
+                break;
+            case "pathSub" when _selectedSubItem is not null:
+                SetSubItemPathRequested?.Invoke(_selectedSubItem);
+                break;
+        }
+    }
+
+    private static int ProgressPercent(ProjectItem item)
+    {
+        if (item.SubItems.Count > 0)
+        {
+            var completed = item.SubItems.Count(subItem => subItem.Done);
+            return (int)Math.Round(completed * 100D / item.SubItems.Count, MidpointRounding.AwayFromZero);
+        }
+
+        if (item.ProgressPercent >= 0)
+        {
+            return Math.Clamp(item.ProgressPercent, 0, 100);
+        }
+
+        return item.Status switch
+        {
+            ProjectStatus.Done => 100,
+            ProjectStatus.Doing => 50,
+            _ => 0
+        };
+    }
+
+    private static string DateRangeText(ProjectItem item)
+    {
+        return item.StartDate.HasValue || item.EndDate.HasValue
+            ? $"开始 {item.StartDate?.ToString("yyyy/MM/dd") ?? "----/--/--"}    截止 {item.EndDate?.ToString("yyyy/MM/dd") ?? "----/--/--"}"
+            : "";
+    }
+
+    private static void DrawButton(Graphics g, Rectangle rect, string text, bool enabled, bool hot)
+    {
+        var fill = !enabled
+            ? Color.FromArgb(38, 48, 62)
+            : hot ? Color.FromArgb(48, 126, 255) : Accent;
+        var border = enabled ? fill : Color.FromArgb(84, 102, 126);
+        var textColor = enabled ? Color.White : Color.FromArgb(112, 126, 146);
+        DrawRoundRect(g, rect, fill, border, 6);
+        TextRenderer.DrawText(g, text, ButtonFont, rect, textColor, TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis);
+    }
+
+    private static void DrawCheckBox(Graphics g, Rectangle rect, bool isChecked)
+    {
+        DrawRoundRect(g, rect, isChecked ? Accent : Color.FromArgb(238, 245, 245, 245), isChecked ? Accent : Color.FromArgb(210, 226, 232, 240), 4);
+        if (!isChecked)
+        {
+            return;
+        }
+
+        using var pen = new Pen(Color.White, 2F) { StartCap = LineCap.Round, EndCap = LineCap.Round };
+        g.DrawLine(pen, rect.X + 4, rect.Y + 9, rect.X + 8, rect.Y + 13);
+        g.DrawLine(pen, rect.X + 8, rect.Y + 13, rect.Right - 4, rect.Y + 5);
+    }
+
+    private static void DrawRoundRect(Graphics g, Rectangle rect, Color fill, Color border, int radius)
+    {
+        using var path = RoundPath(rect, radius);
+        using var brush = new SolidBrush(fill);
+        using var pen = new Pen(border);
+        g.FillPath(brush, path);
+        g.DrawPath(pen, path);
+    }
+
+    private static GraphicsPath RoundPath(Rectangle rect, int radius)
+    {
+        var path = new GraphicsPath();
+        var diameter = radius * 2;
+        rect.Width -= 1;
+        rect.Height -= 1;
+        path.AddArc(rect.Left, rect.Top, diameter, diameter, 180, 90);
+        path.AddArc(rect.Right - diameter, rect.Top, diameter, diameter, 270, 90);
+        path.AddArc(rect.Right - diameter, rect.Bottom - diameter, diameter, diameter, 0, 90);
+        path.AddArc(rect.Left, rect.Bottom - diameter, diameter, diameter, 90, 90);
+        path.CloseFigure();
+        return path;
+    }
+}
+
+internal sealed class NotePageCanvas : Control
+{
+    private readonly NoteData _notes;
+    private readonly NoteCanvasTextBox _editor = new()
+    {
+        Multiline = true,
+        AcceptsTab = true,
+        ScrollBars = ScrollBars.Vertical,
+        BorderStyle = BorderStyle.None,
+        Font = new Font("Microsoft YaHei UI", 13F)
+    };
+    private readonly List<(Rectangle Rect, string Key)> _hotspots = new();
+    private readonly List<(Rectangle Rect, NoteItem Item)> _noteAreas = new();
+    private NoteItem? _selectedItem;
+    private string? _hoverKey;
+    private NoteItem? _hoverItem;
+    private string _status = "";
+    private bool _syncingEditor;
+
+    private static readonly Color Back = Color.FromArgb(22, 30, 42);
+    private static readonly Color CardFill = Color.FromArgb(118, 30, 40, 56);
+    private static readonly Color CardBorder = Color.FromArgb(72, 90, 112);
+    private static readonly Color PanelFill = Color.FromArgb(34, 44, 60);
+    private static readonly Color PanelBorder = Color.FromArgb(64, 82, 104);
+    private static readonly Color SelectedFill = Color.FromArgb(70, 104, 160, 248);
+    private static readonly Color TextMain = Color.FromArgb(238, 243, 249);
+    private static readonly Color TextSubtle = Color.FromArgb(155, 168, 186);
+    private static readonly Color Accent = Color.FromArgb(35, 107, 238);
+    private static readonly Font HeaderFont = new("Microsoft YaHei UI", 18F, FontStyle.Regular);
+    private static readonly Font GroupFont = new("Microsoft YaHei UI", 11.5F, FontStyle.Bold);
+    private static readonly Font NormalFont = new("Microsoft YaHei UI", 9.5F, FontStyle.Regular);
+    private static readonly Font SmallFont = new("Microsoft YaHei UI", 8.5F, FontStyle.Regular);
+    private static readonly Font ButtonFont = new("Microsoft YaHei UI", 9F, FontStyle.Regular);
+
+    public NotePageCanvas(NoteData notes)
+    {
+        _notes = notes;
+        Controls.Add(_editor);
+        _editor.TextChanged += (_, _) =>
+        {
+            if (_syncingEditor || _selectedItem is null)
+            {
+                return;
+            }
+
+            _selectedItem.Text = _editor.Text;
+            NoteTextChanged?.Invoke();
+            Invalidate();
+        };
+        SetStyle(ControlStyles.AllPaintingInWmPaint | ControlStyles.UserPaint | ControlStyles.OptimizedDoubleBuffer | ControlStyles.ResizeRedraw | ControlStyles.SupportsTransparentBackColor, true);
+    }
+
+    public event Action? AddRequested;
+    public event Action<NoteItem>? DeleteRequested;
+    public event Action<NoteItem>? RenameRequested;
+    public event Action<NoteItem>? ColorRequested;
+    public event Action<NoteItem>? TransparentColorRequested;
+    public event Action<NoteItem>? FontColorRequested;
+    public event Action<NoteItem, float>? FontSizeRequested;
+    public event Action<NoteItem>? BoldRequested;
+    public event Action<NoteItem>? ImageRequested;
+    public event Action<NoteItem>? ClearImageRequested;
+    public event Action<NoteItem>? ImageOnlyRequested;
+    public event Action<NoteItem>? PinRequested;
+    public event Action? SaveCurrentRequested;
+    public event Action? NoteTextChanged;
+    public event Action<NoteItem?, TextBox?>? ActiveEditorChanged;
+
+    public void RefreshData(NoteItem? selected = null)
+    {
+        _selectedItem = selected is not null && _notes.Items.Contains(selected)
+            ? selected
+            : _selectedItem is not null && _notes.Items.Contains(_selectedItem)
+                ? _selectedItem
+                : _notes.Items.FirstOrDefault();
+        RefreshEditor();
+        Invalidate();
+    }
+
+    public void SetStatus(string status)
+    {
+        _status = status;
+        Invalidate();
+    }
+
+    protected override void OnPaint(PaintEventArgs e)
+    {
+        var g = e.Graphics;
+        g.SmoothingMode = SmoothingMode.AntiAlias;
+        _hotspots.Clear();
+        _noteAreas.Clear();
+
+        using (var back = new SolidBrush(Back))
+        {
+            g.FillRectangle(back, ClientRectangle);
+        }
+
+        TextRenderer.DrawText(g, "便签", HeaderFont, new Rectangle(0, 0, Width, 70), TextMain, TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis);
+        DrawActions(g);
+        DrawBody(g);
+        PositionEditor();
+    }
+
+    private void DrawActions(Graphics g)
+    {
+        var items = new[]
+        {
+            ("add", "添加便签", true),
+            ("delete", "删除便签", _selectedItem is not null),
+            ("rename", "重命名", _selectedItem is not null),
+            ("color", "颜色", _selectedItem is not null),
+            ("transparent", "透明颜色", _selectedItem is not null),
+            ("fontColor", "字色", _selectedItem is not null),
+            ("fontDown", "A-", _selectedItem is not null),
+            ("fontUp", "A+", _selectedItem is not null),
+            ("bold", "加粗", _selectedItem is not null),
+            ("image", "背景图片", _selectedItem is not null),
+            ("clearImage", "清除背景", _selectedItem is not null),
+            ("imageOnly", "仅显示图片", _selectedItem is not null && !string.IsNullOrWhiteSpace(_selectedItem.BackgroundImagePath)),
+            ("pin", "添加到桌面", _selectedItem is not null)
+        };
+
+        var x = 0;
+        foreach (var item in items)
+        {
+            var width = Math.Max(54, TextRenderer.MeasureText(item.Item2, ButtonFont).Width + 24);
+            var rect = new Rectangle(x, 76, width, 34);
+            var active = item.Item1 == "bold" && _selectedItem?.FontBold == true
+                || item.Item1 == "imageOnly" && _selectedItem?.ImageOnly == true;
+            DrawButton(g, rect, item.Item2, item.Item3, _hoverKey == item.Item1, active);
+            _hotspots.Add((rect, item.Item1));
+            x += width + 8;
+        }
+    }
+
+    private void DrawBody(Graphics g)
+    {
+        var area = new Rectangle(0, 122, Math.Max(1, Width - 10), Math.Max(1, Height - 148));
+        var listRect = new Rectangle(area.X, area.Y, 280, area.Height);
+        var editorRect = new Rectangle(listRect.Right + 16, area.Y, Math.Max(1, area.Right - listRect.Right - 16), area.Height);
+        DrawNoteList(g, listRect);
+        DrawEditorShell(g, editorRect);
+    }
+
+    private void DrawNoteList(Graphics g, Rectangle rect)
+    {
+        DrawRoundRect(g, rect, CardFill, CardBorder, 10);
+        TextRenderer.DrawText(g, "便签列表", GroupFont, new Rectangle(rect.X + 18, rect.Y + 12, rect.Width - 36, 34), TextMain, TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis);
+        var list = new Rectangle(rect.X + 14, rect.Y + 56, rect.Width - 28, rect.Height - 112);
+        DrawRoundRect(g, list, PanelFill, PanelBorder, 8);
+        var y = list.Y + 8;
+        foreach (var item in _notes.Items)
+        {
+            var row = new Rectangle(list.X + 8, y, list.Width - 16, 76);
+            if (row.Bottom > list.Bottom - 8)
+            {
+                break;
+            }
+
+            var selected = ReferenceEquals(item, _selectedItem);
+            DrawRoundRect(g, row, selected ? SelectedFill : ReferenceEquals(item, _hoverItem) ? Color.FromArgb(46, 58, 76) : Color.FromArgb(40, 51, 68), selected ? Color.FromArgb(130, 176, 207, 255) : PanelBorder, 7);
+            var noteColor = Color.FromArgb(item.ColorArgb);
+            var swatch = new Rectangle(row.X + 10, row.Y + 12, 8, row.Height - 24);
+            DrawRoundRect(g, swatch, noteColor.A == 0 ? Color.FromArgb(72, 88, 110) : noteColor, PanelBorder, 4);
+            TextRenderer.DrawText(g, item.Title, GroupFont, new Rectangle(row.X + 28, row.Y + 8, row.Width - 38, 32), TextMain, TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis | TextFormatFlags.NoPadding);
+            var preview = string.IsNullOrWhiteSpace(item.Text) ? "空白便签" : item.Text.Replace("\r", " ").Replace("\n", " ").Trim();
+            TextRenderer.DrawText(g, preview, SmallFont, new Rectangle(row.X + 28, row.Y + 43, row.Width - 38, 22), TextSubtle, TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis);
+            _noteAreas.Add((row, item));
+            y += row.Height + 8;
+        }
+
+        var add = new Rectangle(rect.X + 18, rect.Bottom - 48, 92, 32);
+        DrawButton(g, add, "添加便签", true, _hoverKey == "addList", false);
+        _hotspots.Add((add, "addList"));
+    }
+
+    private void DrawEditorShell(Graphics g, Rectangle rect)
+    {
+        DrawRoundRect(g, rect, CardFill, CardBorder, 10);
+        TextRenderer.DrawText(g, "编辑", GroupFont, new Rectangle(rect.X + 18, rect.Y + 12, rect.Width - 36, 34), TextMain, TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis);
+        var editorArea = EditorBounds(rect);
+        var fill = _selectedItem is null ? PanelFill : EditorBackColor(_selectedItem);
+        DrawRoundRect(g, editorArea, fill, PanelBorder, 8);
+        var statusText = string.IsNullOrWhiteSpace(_status)
+            ? _selectedItem is null ? "无便签" : $"自动保存 · {_selectedItem.UpdatedAt:HH:mm:ss}"
+            : _status;
+        TextRenderer.DrawText(g, statusText, SmallFont, new Rectangle(editorArea.X, editorArea.Bottom + 8, editorArea.Width, 24), TextSubtle, TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis);
+    }
+
+    private void PositionEditor()
+    {
+        var area = new Rectangle(0, 122, Math.Max(1, Width - 10), Math.Max(1, Height - 148));
+        var listRight = area.X + 280;
+        var editorRect = new Rectangle(listRight + 16, area.Y, Math.Max(1, area.Right - listRight - 16), area.Height);
+        var bounds = EditorBounds(editorRect);
+        bounds.Inflate(-16, -16);
+        _editor.Bounds = bounds;
+    }
+
+    private static Rectangle EditorBounds(Rectangle editorRect)
+    {
+        return new Rectangle(editorRect.X + 18, editorRect.Y + 56, editorRect.Width - 36, Math.Max(1, editorRect.Height - 92));
+    }
+
+    private void RefreshEditor()
+    {
+        _syncingEditor = true;
+        try
+        {
+            if (_selectedItem is null)
+            {
+                _editor.Enabled = false;
+                _editor.Text = "";
+                _status = "无便签";
+                ActiveEditorChanged?.Invoke(null, null);
+                return;
+            }
+
+            _editor.Enabled = true;
+            _editor.Text = _selectedItem.Text;
+            _editor.BackColor = EditorBackColor(_selectedItem);
+            _selectedItem.FontColorArgb = NoteStyle.NormalizeTextColorArgb(_selectedItem.FontColorArgb);
+            _editor.ForeColor = _selectedItem.ImageOnly ? _editor.BackColor : NoteStyle.TextColor(_selectedItem);
+            _editor.Font = new Font("Microsoft YaHei UI", Math.Clamp(_selectedItem.FontSize, 8F, 42F), _selectedItem.FontBold ? FontStyle.Bold : FontStyle.Regular);
+            _editor.ScrollBars = _selectedItem.ImageOnly ? ScrollBars.None : ScrollBars.Vertical;
+            _editor.ReadOnly = _selectedItem.ImageOnly;
+            _editor.SetBackground(_selectedItem.BackgroundImagePath, _selectedItem.ImageOnly);
+            _status = string.IsNullOrWhiteSpace(_selectedItem.BackgroundImagePath)
+                ? $"自动保存 · {_selectedItem.UpdatedAt:HH:mm:ss}"
+                : $"自动保存 · 图片背景 · {_selectedItem.UpdatedAt:HH:mm:ss}";
+            ActiveEditorChanged?.Invoke(_selectedItem, _editor);
+        }
+        finally
+        {
+            _syncingEditor = false;
+        }
+    }
+
+    private static Color EditorBackColor(NoteItem item)
+    {
+        var color = Color.FromArgb(item.ColorArgb);
+        return color.A == 0 ? Color.FromArgb(28, 38, 54) : color;
+    }
+
+    protected override void OnMouseMove(MouseEventArgs e)
+    {
+        var key = _hotspots.FirstOrDefault(item => item.Rect.Contains(e.Location)).Key;
+        var item = _noteAreas.FirstOrDefault(area => area.Rect.Contains(e.Location)).Item;
+        if (_hoverKey != key || !ReferenceEquals(_hoverItem, item))
+        {
+            _hoverKey = key;
+            _hoverItem = item;
+            Invalidate();
+        }
+
+        Cursor = key is not null || item is not null ? Cursors.Hand : Cursors.Default;
+        base.OnMouseMove(e);
+    }
+
+    protected override void OnMouseLeave(EventArgs e)
+    {
+        _hoverKey = null;
+        _hoverItem = null;
+        Cursor = Cursors.Default;
+        Invalidate();
+        base.OnMouseLeave(e);
+    }
+
+    protected override void OnMouseClick(MouseEventArgs e)
+    {
+        if (e.Button != MouseButtons.Left)
+        {
+            base.OnMouseClick(e);
+            return;
+        }
+
+        var note = _noteAreas.FirstOrDefault(area => area.Rect.Contains(e.Location)).Item;
+        if (note is not null)
+        {
+            SaveCurrentRequested?.Invoke();
+            _selectedItem = note;
+            RefreshEditor();
+            Invalidate();
+            base.OnMouseClick(e);
+            return;
+        }
+
+        var key = _hotspots.FirstOrDefault(hotspot => hotspot.Rect.Contains(e.Location)).Key;
+        switch (key)
+        {
+            case "add":
+            case "addList":
+                AddRequested?.Invoke();
+                break;
+            case "delete" when _selectedItem is not null:
+                DeleteRequested?.Invoke(_selectedItem);
+                break;
+            case "rename" when _selectedItem is not null:
+                RenameRequested?.Invoke(_selectedItem);
+                break;
+            case "color" when _selectedItem is not null:
+                ColorRequested?.Invoke(_selectedItem);
+                break;
+            case "transparent" when _selectedItem is not null:
+                TransparentColorRequested?.Invoke(_selectedItem);
+                break;
+            case "fontColor" when _selectedItem is not null:
+                FontColorRequested?.Invoke(_selectedItem);
+                break;
+            case "fontDown" when _selectedItem is not null:
+                FontSizeRequested?.Invoke(_selectedItem, -1F);
+                break;
+            case "fontUp" when _selectedItem is not null:
+                FontSizeRequested?.Invoke(_selectedItem, 1F);
+                break;
+            case "bold" when _selectedItem is not null:
+                BoldRequested?.Invoke(_selectedItem);
+                break;
+            case "image" when _selectedItem is not null:
+                ImageRequested?.Invoke(_selectedItem);
+                break;
+            case "clearImage" when _selectedItem is not null:
+                ClearImageRequested?.Invoke(_selectedItem);
+                break;
+            case "imageOnly" when _selectedItem is not null && !string.IsNullOrWhiteSpace(_selectedItem.BackgroundImagePath):
+                ImageOnlyRequested?.Invoke(_selectedItem);
+                break;
+            case "pin" when _selectedItem is not null:
+                PinRequested?.Invoke(_selectedItem);
+                break;
+        }
+
+        base.OnMouseClick(e);
+    }
+
+    private static void DrawButton(Graphics g, Rectangle rect, string text, bool enabled, bool hot, bool active)
+    {
+        var fill = !enabled
+            ? Color.FromArgb(38, 48, 62)
+            : active ? Color.FromArgb(26, 135, 84) : hot ? Color.FromArgb(48, 126, 255) : Accent;
+        var border = enabled ? fill : Color.FromArgb(84, 102, 126);
+        var textColor = enabled ? Color.White : Color.FromArgb(112, 126, 146);
+        DrawRoundRect(g, rect, fill, border, 6);
+        TextRenderer.DrawText(g, text, ButtonFont, rect, textColor, TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis);
+    }
+
+    private static void DrawRoundRect(Graphics g, Rectangle rect, Color fill, Color border, int radius)
+    {
+        using var path = RoundPath(rect, radius);
+        using var brush = new SolidBrush(fill);
+        using var pen = new Pen(border);
+        g.FillPath(brush, path);
+        g.DrawPath(pen, path);
+    }
+
+    private static GraphicsPath RoundPath(Rectangle rect, int radius)
+    {
+        var path = new GraphicsPath();
+        var diameter = radius * 2;
+        rect.Width -= 1;
+        rect.Height -= 1;
+        path.AddArc(rect.Left, rect.Top, diameter, diameter, 180, 90);
+        path.AddArc(rect.Right - diameter, rect.Top, diameter, diameter, 270, 90);
+        path.AddArc(rect.Right - diameter, rect.Bottom - diameter, diameter, diameter, 0, 90);
+        path.AddArc(rect.Left, rect.Bottom - diameter, diameter, diameter, 90, 90);
+        path.CloseFigure();
+        return path;
+    }
+
+    private sealed class NoteCanvasTextBox : TextBox
+    {
+        private const int WmPaint = 0x000F;
+        private Image? _background;
+        private bool _imageOnly;
+
+        public void SetBackground(string? path, bool imageOnly)
+        {
+            _background?.Dispose();
+            _background = null;
+            _imageOnly = imageOnly;
+
+            if (!string.IsNullOrWhiteSpace(path) && File.Exists(path))
+            {
+                try
+                {
+                    using var stream = new MemoryStream(File.ReadAllBytes(path));
+                    using var image = Image.FromStream(stream);
+                    _background = new Bitmap(image);
+                }
+                catch
+                {
+                    _background?.Dispose();
+                    _background = null;
+                }
+            }
+
+            Invalidate();
+        }
+
+        protected override void WndProc(ref Message m)
+        {
+            base.WndProc(ref m);
+            if (m.Msg == WmPaint && _background is not null)
+            {
+                DrawBackgroundWatermark();
+            }
+        }
+
+        protected override void Dispose(bool disposing)
+        {
+            if (disposing)
+            {
+                _background?.Dispose();
+            }
+
+            base.Dispose(disposing);
+        }
+
+        private void DrawBackgroundWatermark()
+        {
+            var bounds = ClientRectangle;
+            if (bounds.Width <= 0 || bounds.Height <= 0)
+            {
+                return;
+            }
+
+            if (ScrollBars is ScrollBars.Vertical or ScrollBars.Both)
+            {
+                bounds.Width = Math.Max(1, bounds.Width - SystemInformation.VerticalScrollBarWidth);
+            }
+
+            var width = _background!.Width;
+            var height = _background.Height;
+            if (!_imageOnly)
+            {
+                var scale = Math.Min(bounds.Width / (float)_background.Width, bounds.Height / (float)_background.Height);
+                width = Math.Max(1, (int)(_background.Width * scale));
+                height = Math.Max(1, (int)(_background.Height * scale));
+            }
+
+            var target = new Rectangle(bounds.X + (bounds.Width - width) / 2, bounds.Y + (bounds.Height - height) / 2, width, height);
+            using var g = Graphics.FromHwnd(Handle);
+            g.DrawImage(_background, target);
+        }
+    }
+}
+
+internal sealed class DesktopPageCanvas : Control
+{
+    private readonly AppConfig _config;
+    private readonly Func<IEnumerable<string>> _desktopEntryProvider;
+    private readonly List<(Rectangle Rect, string Key)> _hotspots = new();
+    private readonly List<(Rectangle Rect, DeskCategory Category)> _categoryAreas = new();
+    private readonly List<(Rectangle Rect, string Path)> _desktopAreas = new();
+    private readonly List<(Rectangle Rect, string Path)> _itemAreas = new();
+    private readonly Dictionary<string, Image> _shellIconCache = new(StringComparer.OrdinalIgnoreCase);
+    private readonly HashSet<string> _selectedDesktopPaths = new(StringComparer.OrdinalIgnoreCase);
+    private readonly HashSet<string> _selectedItemPaths = new(StringComparer.OrdinalIgnoreCase);
+    private List<string> _desktopPaths = new();
+    private List<string> _categoryItemPaths = new();
+    private DeskCategory? _selectedCategory;
+    private string? _hoverKey;
+    private string? _hoverPath;
+    private DesktopDragSource _pendingDragSource;
+    private string? _pendingDragPath;
+    private Point _pendingDragStart;
+
+    private static readonly Color Back = Color.FromArgb(22, 30, 42);
+    private static readonly Color CardFill = Color.FromArgb(118, 30, 40, 56);
+    private static readonly Color CardBorder = Color.FromArgb(72, 90, 112);
+    private static readonly Color PanelFill = Color.FromArgb(34, 44, 60);
+    private static readonly Color PanelBorder = Color.FromArgb(64, 82, 104);
+    private static readonly Color SelectedFill = Color.FromArgb(70, 104, 160, 248);
+    private static readonly Color SelectedBorder = Color.FromArgb(130, 176, 207, 255);
+    private static readonly Color TextMain = Color.FromArgb(238, 243, 249);
+    private static readonly Color TextSubtle = Color.FromArgb(155, 168, 186);
+    private static readonly Color Accent = Color.FromArgb(35, 107, 238);
+    private static readonly Font HeaderFont = new("Microsoft YaHei UI", 18F, FontStyle.Regular);
+    private static readonly Font GroupFont = new("Microsoft YaHei UI", 11.5F, FontStyle.Bold);
+    private static readonly Font NormalFont = new("Microsoft YaHei UI", 9F, FontStyle.Regular);
+    private static readonly Font SmallFont = new("Microsoft YaHei UI", 8F, FontStyle.Regular);
+    private static readonly Font ButtonFont = new("Microsoft YaHei UI", 9F, FontStyle.Regular);
+    private static readonly Font IconFont = new("Microsoft YaHei UI", 11F, FontStyle.Bold);
+
+    public DesktopPageCanvas(AppConfig config, Func<IEnumerable<string>> desktopEntryProvider)
+    {
+        _config = config;
+        _desktopEntryProvider = desktopEntryProvider;
+        AllowDrop = true;
+        SetStyle(ControlStyles.AllPaintingInWmPaint | ControlStyles.UserPaint | ControlStyles.OptimizedDoubleBuffer | ControlStyles.ResizeRedraw | ControlStyles.SupportsTransparentBackColor, true);
+    }
+
+    public event Action? RefreshRequested;
+    public event Action? AddCategoryRequested;
+    public event Action<DeskCategory>? DeleteCategoryRequested;
+    public event Action<DeskCategory>? RenameCategoryRequested;
+    public event Action<DeskCategory>? ToggleCategoryRequested;
+    public event Action? OrganizeRequested;
+    public event Action? PinRequested;
+    public event Action<DeskCategory, IEnumerable<string>>? AddToCategoryRequested;
+    public event Action<IEnumerable<string>>? RemoveFromCategoryRequested;
+    public event Action<string>? OpenRequested;
+
+    public void RefreshData()
+    {
+        _selectedCategory = _selectedCategory is not null && _config.DesktopCategories.Contains(_selectedCategory)
+            ? _selectedCategory
+            : _config.DesktopCategories.FirstOrDefault();
+        RemoveMissingCategoryItems();
+        RefreshDesktopPaths();
+        RefreshCategoryPaths();
+        _selectedDesktopPaths.RemoveWhere(path => !_desktopPaths.Contains(path, StringComparer.OrdinalIgnoreCase));
+        _selectedItemPaths.RemoveWhere(path => !_categoryItemPaths.Contains(path, StringComparer.OrdinalIgnoreCase));
+        Invalidate();
+    }
+
+    protected override void Dispose(bool disposing)
+    {
+        if (disposing)
+        {
+            foreach (var icon in _shellIconCache.Values)
+            {
+                icon.Dispose();
+            }
+
+            _shellIconCache.Clear();
+        }
+
+        base.Dispose(disposing);
+    }
+
+    protected override void OnPaint(PaintEventArgs e)
+    {
+        var g = e.Graphics;
+        g.SmoothingMode = SmoothingMode.AntiAlias;
+        _hotspots.Clear();
+        _categoryAreas.Clear();
+        _desktopAreas.Clear();
+        _itemAreas.Clear();
+
+        using (var back = new SolidBrush(Back))
+        {
+            g.FillRectangle(back, ClientRectangle);
+        }
+
+        TextRenderer.DrawText(g, "桌面收纳", HeaderFont, new Rectangle(0, 0, Width, 70), TextMain, TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis);
+        DrawActions(g);
+        DrawColumns(g);
+    }
+
+    private void DrawActions(Graphics g)
+    {
+        var items = new[]
+        {
+            ("refresh", "刷新桌面", true),
+            ("add", "新建分类", true),
+            ("delete", "删除分类", _selectedCategory is not null),
+            ("rename", "重命名", _selectedCategory is not null),
+            ("toggle", "折叠/展开", _selectedCategory is not null),
+            ("organize", "自动整理", true),
+            ("pin", "添加到桌面", true)
+        };
+
+        var x = 0;
+        foreach (var item in items)
+        {
+            var textWidth = TextRenderer.MeasureText(item.Item2, ButtonFont).Width;
+            var minWidth = item.Item1 is "refresh" or "organize" or "toggle" ? 92 : item.Item1 == "pin" ? 104 : 80;
+            var width = Math.Max(minWidth, textWidth + 24);
+            var rect = new Rectangle(x, 76, width, 34);
+            DrawButton(g, rect, item.Item2, item.Item3, _hoverKey == item.Item1);
+            _hotspots.Add((rect, item.Item1));
+            x += width + 8;
+        }
+    }
+
+    private void DrawColumns(Graphics g)
+    {
+        var area = new Rectangle(0, 122, Math.Max(1, Width - 10), Math.Max(1, Height - 148));
+        const int gap = 16;
+        var categoryWidth = Math.Max(210, (int)(area.Width * 0.28));
+        var entryWidth = Math.Max(230, (area.Width - categoryWidth - gap * 2) / 2);
+        var categoryRect = new Rectangle(area.X, area.Y, categoryWidth, area.Height);
+        var desktopRect = new Rectangle(categoryRect.Right + gap, area.Y, entryWidth, area.Height);
+        var itemRect = new Rectangle(desktopRect.Right + gap, area.Y, Math.Max(1, area.Right - desktopRect.Right - gap), area.Height);
+
+        DrawCategoryColumn(g, categoryRect);
+        DrawEntryColumn(g, desktopRect, "桌面项目", _desktopPaths, _selectedDesktopPaths, _desktopAreas, "addToCategory");
+        DrawEntryColumn(g, itemRect, "分类内容", _categoryItemPaths, _selectedItemPaths, _itemAreas, "removeFromCategory");
+    }
+
+    private void DrawCategoryColumn(Graphics g, Rectangle rect)
+    {
+        DrawRoundRect(g, rect, CardFill, CardBorder, 10);
+        TextRenderer.DrawText(g, "分类", GroupFont, new Rectangle(rect.X + 18, rect.Y + 12, rect.Width - 36, 34), TextMain, TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis);
+        var list = new Rectangle(rect.X + 14, rect.Y + 56, rect.Width - 28, rect.Height - 70);
+        if (_config.DesktopCategories.Count == 0)
+        {
+            TextRenderer.DrawText(g, "暂无分类", NormalFont, list, TextSubtle, TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis);
+            return;
+        }
+
+        var y = list.Y;
+        foreach (var category in _config.DesktopCategories)
+        {
+            var row = new Rectangle(list.X, y, list.Width, 44);
+            if (row.Bottom > list.Bottom)
+            {
+                break;
+            }
+
+            var selected = ReferenceEquals(category, _selectedCategory);
+            DrawRoundRect(g, row, selected ? SelectedFill : PanelFill, selected ? SelectedBorder : PanelBorder, 7);
+            var marker = category.IsCollapsed ? "+" : "-";
+            TextRenderer.DrawText(g, marker, GroupFont, new Rectangle(row.X + 10, row.Y, 24, row.Height), TextSubtle, TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter);
+            TextRenderer.DrawText(g, category.Name, NormalFont, new Rectangle(row.X + 40, row.Y, row.Width - 98, row.Height), TextMain, TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis);
+            TextRenderer.DrawText(g, category.ItemPaths.Count.ToString(), SmallFont, new Rectangle(row.Right - 52, row.Y, 38, row.Height), TextSubtle, TextFormatFlags.Right | TextFormatFlags.VerticalCenter);
+            _categoryAreas.Add((row, category));
+            y += row.Height + 8;
+        }
+    }
+
+    private void DrawEntryColumn(Graphics g, Rectangle rect, string title, IReadOnlyList<string> paths, HashSet<string> selectedPaths, List<(Rectangle Rect, string Path)> areas, string footerKey)
+    {
+        DrawRoundRect(g, rect, CardFill, CardBorder, 10);
+        TextRenderer.DrawText(g, title, GroupFont, new Rectangle(rect.X + 18, rect.Y + 12, rect.Width - 36, 34), TextMain, TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis);
+        var buttonText = footerKey == "addToCategory" ? "归入分类" : "移出分类";
+        var footer = new Rectangle(rect.X + 18, rect.Bottom - 50, 96, 32);
+        var enabled = footerKey == "addToCategory"
+            ? _selectedCategory is not null && _selectedDesktopPaths.Count > 0
+            : _selectedItemPaths.Count > 0;
+        DrawButton(g, footer, buttonText, enabled, _hoverKey == footerKey);
+        _hotspots.Add((footer, footerKey));
+        if (footerKey == "removeFromCategory")
+        {
+            var open = new Rectangle(footer.Right + 10, footer.Y, 64, 32);
+            DrawButton(g, open, "打开", _selectedItemPaths.Count > 0, _hoverKey == "open");
+            _hotspots.Add((open, "open"));
+        }
+
+        var grid = new Rectangle(rect.X + 18, rect.Y + 58, rect.Width - 36, Math.Max(1, rect.Height - 126));
+        DrawRoundRect(g, grid, PanelFill, PanelBorder, 8);
+        if (_selectedCategory?.IsCollapsed == true && footerKey == "removeFromCategory")
+        {
+            TextRenderer.DrawText(g, $"已折叠：{_selectedCategory.ItemPaths.Count} 项", NormalFont, grid, TextSubtle, TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis);
+            return;
+        }
+
+        if (paths.Count == 0)
+        {
+            TextRenderer.DrawText(g, "暂无项目", NormalFont, grid, TextSubtle, TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis);
+            return;
+        }
+
+        const int tileWidth = 88;
+        const int tileHeight = 94;
+        const int gap = 12;
+        var columns = Math.Max(1, (grid.Width - 20 + gap) / (tileWidth + gap));
+        for (var i = 0; i < paths.Count; i++)
+        {
+            var col = i % columns;
+            var row = i / columns;
+            var tile = new Rectangle(grid.X + 12 + col * (tileWidth + gap), grid.Y + 12 + row * (tileHeight + gap), tileWidth, tileHeight);
+            if (tile.Bottom > grid.Bottom - 8)
+            {
+                break;
+            }
+
+            DrawEntryTile(g, tile, paths[i], selectedPaths.Contains(paths[i]));
+            areas.Add((tile, paths[i]));
+        }
+    }
+
+    private void DrawEntryTile(Graphics g, Rectangle tile, string path, bool selected)
+    {
+        if (selected)
+        {
+            DrawRoundRect(g, tile, SelectedFill, SelectedBorder, 8);
+        }
+        else if (string.Equals(_hoverPath, path, StringComparison.OrdinalIgnoreCase))
+        {
+            DrawRoundRect(g, tile, Color.FromArgb(46, 58, 76), PanelBorder, 8);
+        }
+
+        var icon = new Rectangle(tile.X + (tile.Width - 44) / 2, tile.Y + 12, 44, 44);
+        var shellIcon = GetShellIcon(path);
+        if (shellIcon is not null)
+        {
+            g.DrawImage(shellIcon, icon);
+        }
+        else
+        {
+            DrawRoundRect(g, icon, IconColor(path), IconColor(path), 7);
+            TextRenderer.DrawText(g, IconText(path), IconFont, icon, Color.White, TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter);
+        }
+
+        var label = TrimName(GetDisplayName(path), 5);
+        TextRenderer.DrawText(g, label, SmallFont, new Rectangle(tile.X + 4, icon.Bottom + 8, tile.Width - 8, 24), TextMain, TextFormatFlags.HorizontalCenter | TextFormatFlags.Top | TextFormatFlags.EndEllipsis | TextFormatFlags.NoPadding);
+    }
+
+    protected override void OnMouseDown(MouseEventArgs e)
+    {
+        if (e.Button != MouseButtons.Left)
+        {
+            base.OnMouseDown(e);
+            return;
+        }
+
+        var categoryHit = _categoryAreas.FirstOrDefault(area => area.Rect.Contains(e.Location));
+        if (!categoryHit.Rect.IsEmpty)
+        {
+            _selectedCategory = categoryHit.Category;
+            _selectedItemPaths.Clear();
+            RefreshCategoryPaths();
+            Invalidate();
+            return;
+        }
+
+        if (HandleEntryMouseDown(e, _desktopAreas, _selectedDesktopPaths, DesktopDragSource.Desktop))
+        {
+            return;
+        }
+
+        if (HandleEntryMouseDown(e, _itemAreas, _selectedItemPaths, DesktopDragSource.Category))
+        {
+            return;
+        }
+
+        base.OnMouseDown(e);
+    }
+
+    private bool HandleEntryMouseDown(MouseEventArgs e, List<(Rectangle Rect, string Path)> areas, HashSet<string> selectedPaths, DesktopDragSource source)
+    {
+        var hit = areas.FirstOrDefault(area => area.Rect.Contains(e.Location));
+        if (hit.Rect.IsEmpty)
+        {
+            return false;
+        }
+
+        if ((ModifierKeys & Keys.Control) == Keys.Control)
+        {
+            if (!selectedPaths.Add(hit.Path))
+            {
+                selectedPaths.Remove(hit.Path);
+            }
+        }
+        else if (!selectedPaths.Contains(hit.Path))
+        {
+            selectedPaths.Clear();
+            selectedPaths.Add(hit.Path);
+        }
+
+        _pendingDragSource = source;
+        _pendingDragPath = hit.Path;
+        _pendingDragStart = e.Location;
+        Invalidate();
+        return true;
+    }
+
+    protected override void OnMouseMove(MouseEventArgs e)
+    {
+        if (_pendingDragPath is not null && e.Button == MouseButtons.Left
+            && (Math.Abs(e.X - _pendingDragStart.X) >= SystemInformation.DragSize.Width / 2
+                || Math.Abs(e.Y - _pendingDragStart.Y) >= SystemInformation.DragSize.Height / 2))
+        {
+            BeginEntryDrag();
+            return;
+        }
+
+        var key = _hotspots.FirstOrDefault(item => item.Rect.Contains(e.Location)).Key;
+        var path = _desktopAreas.Concat(_itemAreas).FirstOrDefault(area => area.Rect.Contains(e.Location)).Path;
+        if (_hoverKey != key || !string.Equals(_hoverPath, path, StringComparison.OrdinalIgnoreCase))
+        {
+            _hoverKey = key;
+            _hoverPath = path;
+            Invalidate();
+        }
+
+        Cursor = key is not null || path is not null || _categoryAreas.Any(area => area.Rect.Contains(e.Location))
+            ? Cursors.Hand
+            : Cursors.Default;
+        base.OnMouseMove(e);
+    }
+
+    protected override void OnMouseUp(MouseEventArgs e)
+    {
+        _pendingDragPath = null;
+        _pendingDragSource = DesktopDragSource.None;
+        base.OnMouseUp(e);
+    }
+
+    protected override void OnMouseLeave(EventArgs e)
+    {
+        _hoverKey = null;
+        _hoverPath = null;
+        Cursor = Cursors.Default;
+        Invalidate();
+        base.OnMouseLeave(e);
+    }
+
+    protected override void OnMouseClick(MouseEventArgs e)
+    {
+        if (e.Button != MouseButtons.Left)
+        {
+            base.OnMouseClick(e);
+            return;
+        }
+
+        var key = _hotspots.FirstOrDefault(hotspot => hotspot.Rect.Contains(e.Location)).Key;
+        switch (key)
+        {
+            case "refresh":
+                RefreshRequested?.Invoke();
+                break;
+            case "add":
+                AddCategoryRequested?.Invoke();
+                break;
+            case "delete" when _selectedCategory is not null:
+                DeleteCategoryRequested?.Invoke(_selectedCategory);
+                break;
+            case "rename" when _selectedCategory is not null:
+                RenameCategoryRequested?.Invoke(_selectedCategory);
+                break;
+            case "toggle" when _selectedCategory is not null:
+                ToggleCategoryRequested?.Invoke(_selectedCategory);
+                break;
+            case "organize":
+                OrganizeRequested?.Invoke();
+                break;
+            case "pin":
+                PinRequested?.Invoke();
+                break;
+            case "addToCategory" when _selectedCategory is not null && _selectedDesktopPaths.Count > 0:
+                AddToCategoryRequested?.Invoke(_selectedCategory, _selectedDesktopPaths.ToArray());
+                break;
+            case "removeFromCategory" when _selectedItemPaths.Count > 0:
+                RemoveFromCategoryRequested?.Invoke(_selectedItemPaths.ToArray());
+                break;
+            case "open" when _selectedItemPaths.Count > 0:
+                OpenRequested?.Invoke(_selectedItemPaths.First());
+                break;
+        }
+
+        base.OnMouseClick(e);
+    }
+
+    protected override void OnMouseDoubleClick(MouseEventArgs e)
+    {
+        var item = _itemAreas.FirstOrDefault(area => area.Rect.Contains(e.Location)).Path;
+        if (item is not null)
+        {
+            OpenRequested?.Invoke(item);
+        }
+
+        base.OnMouseDoubleClick(e);
+    }
+
+    protected override void OnDragEnter(DragEventArgs drgevent)
+    {
+        drgevent.Effect = GetDroppedPaths(drgevent).Length == 0 ? DragDropEffects.None : DragDropEffects.Move;
+        base.OnDragEnter(drgevent);
+    }
+
+    protected override void OnDragOver(DragEventArgs drgevent)
+    {
+        drgevent.Effect = GetDroppedPaths(drgevent).Length == 0 ? DragDropEffects.None : DragDropEffects.Move;
+        base.OnDragOver(drgevent);
+    }
+
+    protected override void OnDragDrop(DragEventArgs drgevent)
+    {
+        if (_selectedCategory is not null)
+        {
+            var paths = GetDroppedPaths(drgevent);
+            if (paths.Length > 0)
+            {
+                DustDeskDragData.MarkLauncherCopyHandled(drgevent.Data);
+                AddToCategoryRequested?.Invoke(_selectedCategory, paths);
+            }
+        }
+
+        base.OnDragDrop(drgevent);
+    }
+
+    private void BeginEntryDrag()
+    {
+        var source = _pendingDragSource;
+        var path = _pendingDragPath;
+        _pendingDragPath = null;
+        _pendingDragSource = DesktopDragSource.None;
+        if (path is null)
+        {
+            return;
+        }
+
+        var paths = source == DesktopDragSource.Category
+            ? _selectedItemPaths.DefaultIfEmpty(path).Distinct(StringComparer.OrdinalIgnoreCase).ToArray()
+            : _selectedDesktopPaths.DefaultIfEmpty(path).Distinct(StringComparer.OrdinalIgnoreCase).ToArray();
+        var handled = false;
+        using var preview = new DragPreviewForm(paths);
+        void MovePreview() => preview.MoveToCursor(Cursor.Position);
+        GiveFeedbackEventHandler giveFeedback = (_, e) =>
+        {
+            e.UseDefaultCursors = true;
+            MovePreview();
+        };
+        QueryContinueDragEventHandler queryContinue = (_, _) => MovePreview();
+        try
+        {
+            preview.Show();
+            MovePreview();
+            GiveFeedback += giveFeedback;
+            QueryContinueDrag += queryContinue;
+            var data = new DataObject();
+            data.SetData(DataFormats.Text, paths.FirstOrDefault() ?? "");
+            data.SetData(DataFormats.FileDrop, paths);
+            data.SetData(DustDeskDragData.LauncherCopyHandledFormat, new Action(() => handled = true));
+            var effect = DoDragDrop(data, DragDropEffects.Move | DragDropEffects.Copy);
+            if (source == DesktopDragSource.Category && effect != DragDropEffects.None && !handled)
+            {
+                RemoveFromCategoryRequested?.Invoke(paths);
+            }
+        }
+        finally
+        {
+            GiveFeedback -= giveFeedback;
+            QueryContinueDrag -= queryContinue;
+            preview.Close();
+        }
+    }
+
+    private void RefreshDesktopPaths()
+    {
+        var assigned = _config.DesktopCategories
+            .SelectMany(category => category.ItemPaths)
+            .Where(path => !string.IsNullOrWhiteSpace(path))
+            .ToHashSet(StringComparer.OrdinalIgnoreCase);
+        var assignedNames = assigned
+            .Select(Path.GetFileName)
+            .Where(name => !string.IsNullOrWhiteSpace(name))
+            .ToHashSet(StringComparer.OrdinalIgnoreCase);
+
+        _desktopPaths = _desktopEntryProvider()
+            .Where(path => !assigned.Contains(path) && !assignedNames.Contains(Path.GetFileName(path)))
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToList();
+    }
+
+    private void RefreshCategoryPaths()
+    {
+        _categoryItemPaths = _selectedCategory is null || _selectedCategory.IsCollapsed
+            ? new List<string>()
+            : _selectedCategory.ItemPaths.Where(path => File.Exists(path) || Directory.Exists(path)).Distinct(StringComparer.OrdinalIgnoreCase).ToList();
+    }
+
+    private void RemoveMissingCategoryItems()
+    {
+        foreach (var category in _config.DesktopCategories)
+        {
+            category.ItemPaths.RemoveAll(path => !File.Exists(path) && !Directory.Exists(path));
+        }
+    }
+
+    private Image? GetShellIcon(string path)
+    {
+        if (_shellIconCache.TryGetValue(path, out var cached))
+        {
+            return cached;
+        }
+
+        var icon = ShellIconLoader.LoadLargeIcon(path);
+        if (icon is not null)
+        {
+            _shellIconCache[path] = icon;
+        }
+
+        return icon;
+    }
+
+    private static string GetDisplayName(string path)
+    {
+        var name = Path.GetFileNameWithoutExtension(path);
+        return string.IsNullOrWhiteSpace(name) ? Path.GetFileName(path) : name;
+    }
+
+    private static string TrimName(string name, int maxLength)
+    {
+        return string.IsNullOrWhiteSpace(name) || name.Length <= maxLength ? name : name[..maxLength];
+    }
+
+    private static Color IconColor(string text)
+    {
+        var hash = Math.Abs(text.GetHashCode());
+        return Color.FromArgb(255, 70 + hash % 90, 95 + hash / 7 % 90, 135 + hash / 13 % 80);
+    }
+
+    private static string IconText(string path)
+    {
+        var name = GetDisplayName(path).Trim();
+        return string.IsNullOrEmpty(name) ? "?" : name[0].ToString().ToUpperInvariant();
+    }
+
+    private static void DrawButton(Graphics g, Rectangle rect, string text, bool enabled, bool hot)
+    {
+        var fill = !enabled
+            ? Color.FromArgb(38, 48, 62)
+            : hot ? Color.FromArgb(48, 126, 255) : Accent;
+        var border = enabled ? fill : Color.FromArgb(84, 102, 126);
+        var textColor = enabled ? Color.White : Color.FromArgb(112, 126, 146);
+        DrawRoundRect(g, rect, fill, border, 6);
+        TextRenderer.DrawText(g, text, ButtonFont, rect, textColor, TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis);
+    }
+
+    private static void DrawRoundRect(Graphics g, Rectangle rect, Color fill, Color border, int radius)
+    {
+        using var path = RoundPath(rect, radius);
+        using var brush = new SolidBrush(fill);
+        using var pen = new Pen(border);
+        g.FillPath(brush, path);
+        g.DrawPath(pen, path);
+    }
+
+    private static string[] GetDroppedPaths(DragEventArgs e)
+    {
+        if (e.Data?.GetDataPresent(DataFormats.FileDrop) == true
+            && e.Data.GetData(DataFormats.FileDrop) is string[] files
+            && files.Length > 0)
+        {
+            return files.Where(path => File.Exists(path) || Directory.Exists(path)).Distinct(StringComparer.OrdinalIgnoreCase).ToArray();
+        }
+
+        return e.Data?.GetDataPresent(DataFormats.Text) == true
+            && e.Data.GetData(DataFormats.Text) is string path
+            && (File.Exists(path) || Directory.Exists(path))
+            ? new[] { path }
+            : Array.Empty<string>();
+    }
+
+    private static GraphicsPath RoundPath(Rectangle rect, int radius)
+    {
+        var path = new GraphicsPath();
+        var diameter = radius * 2;
+        rect.Width -= 1;
+        rect.Height -= 1;
+        path.AddArc(rect.Left, rect.Top, diameter, diameter, 180, 90);
+        path.AddArc(rect.Right - diameter, rect.Top, diameter, diameter, 270, 90);
+        path.AddArc(rect.Right - diameter, rect.Bottom - diameter, diameter, diameter, 0, 90);
+        path.AddArc(rect.Left, rect.Bottom - diameter, diameter, diameter, 90, 90);
+        path.CloseFigure();
+        return path;
+    }
+
+    private enum DesktopDragSource
+    {
+        None,
+        Desktop,
+        Category
+    }
+}
+
+internal sealed class TodoPageCanvas : Control
+{
+    private readonly TodoData _todos;
+    private readonly List<(Rectangle Rect, string Key)> _hotspots = new();
+    private readonly List<(Rectangle Rect, Rectangle CheckRect, TodoItem Item)> _itemAreas = new();
+    private readonly List<(Rectangle Rect, DateTime Date)> _calendarDayAreas = new();
+    private readonly ToolTip _toolTip = new()
+    {
+        AutomaticDelay = 250,
+        ReshowDelay = 100,
+        AutoPopDelay = 8000
+    };
+    private DateTime _filterDate = DateTime.Today;
+    private DateTime _calendarMonth = new(DateTime.Today.Year, DateTime.Today.Month, 1);
+    private Rectangle _dateButtonRect;
+    private Rectangle _calendarRect;
+    private bool _calendarOpen;
+    private TodoItem? _selectedItem;
+    private string? _hoverKey;
+    private TodoItem? _hoverItem;
+
+    private static readonly Color Back = Color.FromArgb(22, 30, 42);
+    private static readonly Color CardFill = Color.FromArgb(118, 30, 40, 56);
+    private static readonly Color CardBorder = Color.FromArgb(72, 90, 112);
+    private static readonly Color PanelFill = Color.FromArgb(34, 44, 60);
+    private static readonly Color PanelBorder = Color.FromArgb(64, 82, 104);
+    private static readonly Color SelectedFill = Color.FromArgb(70, 104, 160, 248);
+    private static readonly Color TextMain = Color.FromArgb(238, 243, 249);
+    private static readonly Color TextSubtle = Color.FromArgb(155, 168, 186);
+    private static readonly Color Accent = Color.FromArgb(35, 107, 238);
+    private static readonly Font HeaderFont = new("Microsoft YaHei UI", 18F, FontStyle.Regular);
+    private static readonly Font GroupFont = new("Microsoft YaHei UI", 11.5F, FontStyle.Bold);
+    private static readonly Font NormalFont = new("Microsoft YaHei UI", 10.5F, FontStyle.Regular);
+    private static readonly Font SmallFont = new("Microsoft YaHei UI", 8.5F, FontStyle.Regular);
+    private static readonly Font ButtonFont = new("Microsoft YaHei UI", 9F, FontStyle.Regular);
+
+    public TodoPageCanvas(TodoData todos)
+    {
+        _todos = todos;
+        SetStyle(ControlStyles.AllPaintingInWmPaint | ControlStyles.UserPaint | ControlStyles.OptimizedDoubleBuffer | ControlStyles.ResizeRedraw | ControlStyles.SupportsTransparentBackColor, true);
+    }
+
+    public event Action? AddRequested;
+    public event Action<TodoItem>? EditRequested;
+    public event Action<TodoItem>? DeleteRequested;
+    public event Action<TodoItem>? DoneChanged;
+    public event Action<TodoItem>? DetailRequested;
+
+    public void RefreshData(TodoItem? selectItem = null)
+    {
+        if (selectItem is not null)
+        {
+            _selectedItem = selectItem;
+            _filterDate = selectItem.CreatedAt.Date;
+        }
+        else if (_selectedItem is not null && !_todos.Items.Contains(_selectedItem))
+        {
+            _selectedItem = null;
+        }
+
+        Invalidate();
+    }
+
+    protected override void Dispose(bool disposing)
+    {
+        if (disposing)
+        {
+            _toolTip.Dispose();
+        }
+
+        base.Dispose(disposing);
+    }
+
+    protected override void OnPaint(PaintEventArgs e)
+    {
+        var g = e.Graphics;
+        g.SmoothingMode = SmoothingMode.AntiAlias;
+        _hotspots.Clear();
+        _itemAreas.Clear();
+        _calendarDayAreas.Clear();
+
+        using (var back = new SolidBrush(Back))
+        {
+            g.FillRectangle(back, ClientRectangle);
+        }
+
+        TextRenderer.DrawText(g, "工作记录", HeaderFont, new Rectangle(0, 0, Width, 70), TextMain, TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis);
+        DrawActions(g);
+        DrawList(g, new Rectangle(0, 122, Math.Max(1, Width - 10), Math.Max(1, Height - 148)));
+        if (_calendarOpen)
+        {
+            DrawCalendar(g);
+        }
+    }
+
+    private void DrawActions(Graphics g)
+    {
+        var items = new[]
+        {
+            ("add", "新增", true),
+            ("edit", "编辑", _selectedItem is not null),
+            ("delete", "删除", _selectedItem is not null),
+            ("prev", "前一天", true),
+            ("today", "今天", true),
+            ("next", "后一天", true)
+        };
+
+        var x = 0;
+        foreach (var item in items)
+        {
+            var textWidth = TextRenderer.MeasureText(item.Item2, ButtonFont).Width;
+            var width = Math.Max(item.Item1 is "prev" or "today" or "next" ? 74 : 64, textWidth + 24);
+            var rect = new Rectangle(x, 76, width, 34);
+            DrawButton(g, rect, item.Item2, item.Item3, _hoverKey == item.Item1);
+            _hotspots.Add((rect, item.Item1));
+            x += width + 8;
+        }
+
+        var dateText = _filterDate == DateTime.Today ? $"{_filterDate:yyyy-MM-dd}  今天" : $"{_filterDate:yyyy-MM-dd}";
+        var dateWidth = Math.Max(160, TextRenderer.MeasureText(dateText, NormalFont).Width + 22);
+        _dateButtonRect = new Rectangle(x + 10, 76, dateWidth, 34);
+        DrawRoundRect(g, _dateButtonRect, _calendarOpen || _hoverKey == "date" ? Color.FromArgb(46, 58, 76) : Color.Transparent, PanelBorder, 6);
+        TextRenderer.DrawText(g, dateText, NormalFont, _dateButtonRect, TextMain, TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis);
+        _hotspots.Add((_dateButtonRect, "date"));
+    }
+
+    private void DrawList(Graphics g, Rectangle rect)
+    {
+        DrawRoundRect(g, rect, CardFill, CardBorder, 10);
+        var title = $"任务  {_filterDate:yyyy-MM-dd}";
+        TextRenderer.DrawText(g, title, GroupFont, new Rectangle(rect.X + 18, rect.Y + 12, rect.Width - 36, 34), TextMain, TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis);
+        var list = new Rectangle(rect.X + 14, rect.Y + 56, rect.Width - 28, rect.Height - 72);
+        DrawRoundRect(g, list, PanelFill, PanelBorder, 8);
+        var items = FilteredItems().ToArray();
+        if (items.Length == 0)
+        {
+            TextRenderer.DrawText(g, "当天暂无记录", NormalFont, list, TextSubtle, TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis);
+            return;
+        }
+
+        var y = list.Y + 8;
+        foreach (var item in items)
+        {
+            var row = new Rectangle(list.X + 8, y, list.Width - 16, 36);
+            if (row.Bottom > list.Bottom - 8)
+            {
+                break;
+            }
+
+            DrawTodoRow(g, row, item);
+            y += row.Height + 4;
+        }
+    }
+
+    private void DrawTodoRow(Graphics g, Rectangle row, TodoItem item)
+    {
+        var selected = ReferenceEquals(item, _selectedItem);
+        if (selected || ReferenceEquals(item, _hoverItem))
+        {
+            DrawRoundRect(g, row, selected ? SelectedFill : Color.FromArgb(46, 58, 76), selected ? Color.FromArgb(130, 176, 207, 255) : PanelBorder, 6);
+        }
+
+        var check = new Rectangle(row.X + 8, row.Y + 8, 18, 18);
+        DrawCheckBox(g, check, item.Done);
+        var tag = string.IsNullOrWhiteSpace(item.Tag) ? "未分类" : item.Tag.Trim();
+        var text = $"{item.Text}    {item.CreatedAt:MM-dd HH:mm}    [{tag}]";
+        var textColor = item.Done ? TextSubtle : TextMain;
+        TextRenderer.DrawText(g, text, NormalFont, new Rectangle(row.X + 36, row.Y, row.Width - 44, row.Height), textColor, TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis);
+        _itemAreas.Add((row, check, item));
+    }
+
+    private void DrawCalendar(Graphics g)
+    {
+        _calendarDayAreas.Clear();
+        var x = Math.Min(_dateButtonRect.X, Math.Max(0, Width - 306));
+        _calendarRect = new Rectangle(x, _dateButtonRect.Bottom + 8, 306, 292);
+        DrawRoundRect(g, _calendarRect, Color.FromArgb(248, 27, 37, 52), CardBorder, 10);
+
+        var prev = new Rectangle(_calendarRect.X + 16, _calendarRect.Y + 14, 30, 28);
+        var next = new Rectangle(_calendarRect.Right - 46, _calendarRect.Y + 14, 30, 28);
+        DrawButton(g, prev, "<", true, _hoverKey == "calendarPrev");
+        DrawButton(g, next, ">", true, _hoverKey == "calendarNext");
+        _hotspots.Add((prev, "calendarPrev"));
+        _hotspots.Add((next, "calendarNext"));
+        TextRenderer.DrawText(g, $"{_calendarMonth:yyyy年 MM月}", GroupFont, new Rectangle(_calendarRect.X + 54, _calendarRect.Y + 12, _calendarRect.Width - 108, 32), TextMain, TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter);
+
+        var weekTop = _calendarRect.Y + 54;
+        var daySize = 36;
+        var gap = 6;
+        var startX = _calendarRect.X + 16;
+        var weekNames = new[] { "日", "一", "二", "三", "四", "五", "六" };
+        for (var i = 0; i < weekNames.Length; i++)
+        {
+            var rect = new Rectangle(startX + i * (daySize + gap), weekTop, daySize, 24);
+            TextRenderer.DrawText(g, weekNames[i], SmallFont, rect, TextSubtle, TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter);
+        }
+
+        var first = _calendarMonth;
+        var days = DateTime.DaysInMonth(first.Year, first.Month);
+        var offset = (int)first.DayOfWeek;
+        var status = BuildDateStatus();
+        for (var day = 1; day <= days; day++)
+        {
+            var slot = offset + day - 1;
+            var col = slot % 7;
+            var row = slot / 7;
+            var rect = new Rectangle(startX + col * (daySize + gap), weekTop + 30 + row * (daySize + gap), daySize, daySize);
+            var date = new DateTime(first.Year, first.Month, day);
+            var selected = date.Date == _filterDate.Date;
+            var today = date.Date == DateTime.Today;
+            if (selected || today)
+            {
+                DrawRoundRect(g, rect, selected ? SelectedFill : Color.FromArgb(44, 58, 76), selected ? Color.FromArgb(130, 176, 207, 255) : PanelBorder, 8);
+            }
+
+            TextRenderer.DrawText(g, day.ToString(), NormalFont, rect, TextMain, TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter);
+            if (status.TryGetValue(date.Date, out var color))
+            {
+                using var brush = new SolidBrush(color);
+                g.FillEllipse(brush, rect.X + rect.Width / 2 - 3, rect.Bottom - 8, 6, 6);
+            }
+
+            _calendarDayAreas.Add((rect, date));
+        }
+    }
+
+    private Dictionary<DateTime, Color> BuildDateStatus()
+    {
+        return _todos.Items
+            .GroupBy(item => item.CreatedAt.Date)
+            .ToDictionary(
+                group => group.Key,
+                group =>
+                {
+                    var total = group.Count();
+                    var done = group.Count(item => item.Done);
+                    if (done == 0)
+                    {
+                        return Color.FromArgb(255, 86, 86);
+                    }
+
+                    return done == total ? Color.FromArgb(58, 214, 122) : Color.FromArgb(245, 158, 11);
+                });
+    }
+
+    protected override void OnMouseMove(MouseEventArgs e)
+    {
+        var key = _hotspots.FirstOrDefault(item => item.Rect.Contains(e.Location)).Key;
+        var item = _itemAreas.FirstOrDefault(area => area.Rect.Contains(e.Location)).Item;
+        var hoveringCalendarDay = _calendarOpen && _calendarDayAreas.Any(area => area.Rect.Contains(e.Location));
+        if (_hoverKey != key || !ReferenceEquals(_hoverItem, item))
+        {
+            _hoverKey = key;
+            _hoverItem = item;
+            _toolTip.SetToolTip(this, item is not null && !string.IsNullOrWhiteSpace(item.Note) ? item.Note : string.Empty);
+            Invalidate();
+        }
+
+        Cursor = key is not null || item is not null || hoveringCalendarDay ? Cursors.Hand : Cursors.Default;
+        base.OnMouseMove(e);
+    }
+
+    protected override void OnMouseLeave(EventArgs e)
+    {
+        _hoverKey = null;
+        _hoverItem = null;
+        Cursor = Cursors.Default;
+        _toolTip.SetToolTip(this, string.Empty);
+        Invalidate();
+        base.OnMouseLeave(e);
+    }
+
+    protected override void OnMouseClick(MouseEventArgs e)
+    {
+        if (e.Button != MouseButtons.Left)
+        {
+            base.OnMouseClick(e);
+            return;
+        }
+
+        if (_calendarOpen)
+        {
+            var calendarDay = _calendarDayAreas.FirstOrDefault(area => area.Rect.Contains(e.Location));
+            if (!calendarDay.Rect.IsEmpty)
+            {
+                _filterDate = calendarDay.Date;
+                _selectedItem = null;
+                _calendarOpen = false;
+                Invalidate();
+                base.OnMouseClick(e);
+                return;
+            }
+        }
+
+        var row = _itemAreas.FirstOrDefault(area => area.Rect.Contains(e.Location));
+        if (!row.Rect.IsEmpty)
+        {
+            _calendarOpen = false;
+            _selectedItem = row.Item;
+            if (row.CheckRect.Contains(e.Location))
+            {
+                row.Item.Done = !row.Item.Done;
+                DoneChanged?.Invoke(row.Item);
+            }
+            else
+            {
+                Invalidate();
+            }
+
+            base.OnMouseClick(e);
+            return;
+        }
+
+        var key = _hotspots.FirstOrDefault(hotspot => hotspot.Rect.Contains(e.Location)).Key;
+        switch (key)
+        {
+            case "add":
+                AddRequested?.Invoke();
+                break;
+            case "edit" when _selectedItem is not null:
+                EditRequested?.Invoke(_selectedItem);
+                break;
+            case "delete" when _selectedItem is not null:
+                DeleteRequested?.Invoke(_selectedItem);
+                break;
+            case "date":
+                _calendarOpen = !_calendarOpen;
+                _calendarMonth = new DateTime(_filterDate.Year, _filterDate.Month, 1);
+                Invalidate();
+                break;
+            case "calendarPrev":
+                _calendarMonth = _calendarMonth.AddMonths(-1);
+                _calendarOpen = true;
+                Invalidate();
+                break;
+            case "calendarNext":
+                _calendarMonth = _calendarMonth.AddMonths(1);
+                _calendarOpen = true;
+                Invalidate();
+                break;
+            case "prev":
+                _filterDate = _filterDate.AddDays(-1);
+                _calendarMonth = new DateTime(_filterDate.Year, _filterDate.Month, 1);
+                _selectedItem = null;
+                _calendarOpen = false;
+                Invalidate();
+                break;
+            case "today":
+                _filterDate = DateTime.Today;
+                _calendarMonth = new DateTime(_filterDate.Year, _filterDate.Month, 1);
+                _selectedItem = null;
+                _calendarOpen = false;
+                Invalidate();
+                break;
+            case "next":
+                _filterDate = _filterDate.AddDays(1);
+                _calendarMonth = new DateTime(_filterDate.Year, _filterDate.Month, 1);
+                _selectedItem = null;
+                _calendarOpen = false;
+                Invalidate();
+                break;
+            case null:
+                if (!_calendarRect.Contains(e.Location))
+                {
+                    _calendarOpen = false;
+                    Invalidate();
+                }
+
+                break;
+        }
+
+        base.OnMouseClick(e);
+    }
+
+    protected override void OnMouseDoubleClick(MouseEventArgs e)
+    {
+        var row = _itemAreas.FirstOrDefault(area => area.Rect.Contains(e.Location));
+        if (!row.Rect.IsEmpty)
+        {
+            _selectedItem = row.Item;
+            DetailRequested?.Invoke(row.Item);
+        }
+
+        base.OnMouseDoubleClick(e);
+    }
+
+    protected override void OnMouseUp(MouseEventArgs e)
+    {
+        if (e.Button == MouseButtons.Right)
+        {
+            var row = _itemAreas.FirstOrDefault(area => area.Rect.Contains(e.Location));
+            if (!row.Rect.IsEmpty)
+            {
+                _selectedItem = row.Item;
+                Invalidate();
+                var menu = new ContextMenuStrip { ShowImageMargin = false };
+                menu.Items.Add("查看详情", null, (_, _) => DetailRequested?.Invoke(row.Item));
+                menu.Show(this, e.Location);
+            }
+        }
+
+        base.OnMouseUp(e);
+    }
+
+    private IEnumerable<TodoItem> FilteredItems()
+    {
+        return _todos.Items.Where(item => item.CreatedAt.Date == _filterDate.Date);
+    }
+
+    private static void DrawButton(Graphics g, Rectangle rect, string text, bool enabled, bool hot)
+    {
+        var fill = !enabled
+            ? Color.FromArgb(38, 48, 62)
+            : hot ? Color.FromArgb(48, 126, 255) : Accent;
+        var border = enabled ? fill : Color.FromArgb(84, 102, 126);
+        var textColor = enabled ? Color.White : Color.FromArgb(112, 126, 146);
+        DrawRoundRect(g, rect, fill, border, 6);
+        TextRenderer.DrawText(g, text, ButtonFont, rect, textColor, TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis);
+    }
+
+    private static void DrawCheckBox(Graphics g, Rectangle rect, bool isChecked)
+    {
+        DrawRoundRect(g, rect, isChecked ? Accent : Color.FromArgb(238, 245, 245, 245), isChecked ? Accent : Color.FromArgb(210, 226, 232, 240), 4);
+        if (!isChecked)
+        {
+            return;
+        }
+
+        using var pen = new Pen(Color.White, 2F)
+        {
+            StartCap = LineCap.Round,
+            EndCap = LineCap.Round
+        };
+        g.DrawLine(pen, rect.X + 4, rect.Y + 9, rect.X + 8, rect.Y + 13);
+        g.DrawLine(pen, rect.X + 8, rect.Y + 13, rect.Right - 4, rect.Y + 5);
+    }
+
+    private static void DrawRoundRect(Graphics g, Rectangle rect, Color fill, Color border, int radius)
+    {
+        using var path = RoundPath(rect, radius);
+        using var brush = new SolidBrush(fill);
+        using var pen = new Pen(border);
+        g.FillPath(brush, path);
+        g.DrawPath(pen, path);
+    }
+
+    private static GraphicsPath RoundPath(Rectangle rect, int radius)
+    {
+        var path = new GraphicsPath();
+        var diameter = radius * 2;
+        rect.Width -= 1;
+        rect.Height -= 1;
+        path.AddArc(rect.Left, rect.Top, diameter, diameter, 180, 90);
+        path.AddArc(rect.Right - diameter, rect.Top, diameter, diameter, 270, 90);
+        path.AddArc(rect.Right - diameter, rect.Bottom - diameter, diameter, diameter, 0, 90);
+        path.AddArc(rect.Left, rect.Bottom - diameter, diameter, diameter, 90, 90);
+        path.CloseFigure();
+        return path;
+    }
+}
+
+internal sealed class LauncherPageCanvas : Control
+{
+    private readonly LaunchData _launchers;
+    private readonly int _maxLaunchers;
+    private readonly Dictionary<string, Image> _iconCache = new(StringComparer.OrdinalIgnoreCase);
+    private readonly List<(Rectangle Rect, string Key)> _hotspots = new();
+    private readonly List<(Rectangle Rect, LaunchItem Item)> _itemAreas = new();
+    private LaunchItem? _selectedItem;
+    private string? _hoverKey;
+    private LaunchItem? _hoverItem;
+
+    private static readonly Color Back = Color.FromArgb(22, 30, 42);
+    private static readonly Color CardFill = Color.FromArgb(118, 30, 40, 56);
+    private static readonly Color CardBorder = Color.FromArgb(72, 90, 112);
+    private static readonly Color RowFill = Color.FromArgb(42, 51, 67);
+    private static readonly Color RowHot = Color.FromArgb(50, 64, 84);
+    private static readonly Color RowSelected = Color.FromArgb(54, 112, 210);
+    private static readonly Color TextMain = Color.FromArgb(238, 243, 249);
+    private static readonly Color TextSubtle = Color.FromArgb(155, 168, 186);
+    private static readonly Color Accent = Color.FromArgb(35, 107, 238);
+    private static readonly Font HeaderFont = new("Microsoft YaHei UI", 18F, FontStyle.Regular);
+    private static readonly Font GroupFont = new("Microsoft YaHei UI", 11F, FontStyle.Regular);
+    private static readonly Font NormalFont = new("Microsoft YaHei UI", 9.5F, FontStyle.Regular);
+    private static readonly Font ItemFont = new("Microsoft YaHei UI", 11F, FontStyle.Bold);
+    private static readonly Font ButtonFont = new("Microsoft YaHei UI", 9F, FontStyle.Regular);
+
+    public LauncherPageCanvas(LaunchData launchers, int maxLaunchers)
+    {
+        _launchers = launchers;
+        _maxLaunchers = maxLaunchers;
+        AllowDrop = true;
+        SetStyle(ControlStyles.AllPaintingInWmPaint | ControlStyles.UserPaint | ControlStyles.OptimizedDoubleBuffer | ControlStyles.ResizeRedraw | ControlStyles.SupportsTransparentBackColor, true);
+    }
+
+    public event Action? AddRequested;
+    public event Action? PinRequested;
+    public event Action<LaunchItem>? EditRequested;
+    public event Action<LaunchItem>? DeleteRequested;
+    public event Action<LaunchItem>? OpenRequested;
+    public event Action<DragEventArgs>? LauncherDropped;
+
+    public void RefreshData()
+    {
+        if (_selectedItem is not null && !_launchers.Items.Contains(_selectedItem))
+        {
+            _selectedItem = null;
+        }
+
+        Invalidate();
+    }
+
+    public void ClearSelection()
+    {
+        _selectedItem = null;
+        Invalidate();
+    }
+
+    protected override void Dispose(bool disposing)
+    {
+        if (disposing)
+        {
+            foreach (var icon in _iconCache.Values)
+            {
+                icon.Dispose();
+            }
+
+            _iconCache.Clear();
+        }
+
+        base.Dispose(disposing);
+    }
+
+    protected override void OnPaint(PaintEventArgs e)
+    {
+        var g = e.Graphics;
+        g.SmoothingMode = SmoothingMode.AntiAlias;
+        _hotspots.Clear();
+        _itemAreas.Clear();
+
+        using (var back = new SolidBrush(Back))
+        {
+            g.FillRectangle(back, ClientRectangle);
+        }
+
+        TextRenderer.DrawText(g, "快捷启动", HeaderFont, new Rectangle(0, 0, Width, 70), TextMain, TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis);
+        DrawActions(g);
+        DrawLauncherList(g, new Rectangle(0, 122, Math.Max(1, Width - 10), Math.Max(1, Height - 148)));
+    }
+
+    private void DrawActions(Graphics g)
+    {
+        var items = new[]
+        {
+            ("add", "添加", true),
+            ("edit", "编辑", true),
+            ("delete", "删除", true),
+            ("open", "启动", true),
+            ("pin", "添加到桌面", true)
+        };
+        var x = 0;
+        foreach (var item in items)
+        {
+            var width = item.Item1 == "pin" ? 104 : 64;
+            var rect = new Rectangle(x, 76, width, 34);
+            var enabled = item.Item1 is "add" or "pin" || _selectedItem is not null;
+            DrawButton(g, rect, item.Item2, item.Item3 && enabled, enabled, _hoverKey == item.Item1);
+            _hotspots.Add((rect, item.Item1));
+            x += width + 8;
+        }
+    }
+
+    private void DrawLauncherList(Graphics g, Rectangle rect)
+    {
+        DrawRoundRect(g, rect, CardFill, CardBorder, 10);
+        TextRenderer.DrawText(g, "常用软件", GroupFont, new Rectangle(rect.X + 20, rect.Y + 12, rect.Width - 40, 34), TextMain, TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis);
+
+        var list = new Rectangle(rect.X + 18, rect.Y + 58, rect.Width - 36, rect.Height - 76);
+        if (_launchers.Items.Count == 0)
+        {
+            TextRenderer.DrawText(g, "暂无快捷启动", NormalFont, list, TextSubtle, TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis);
+            return;
+        }
+
+        const int rowHeight = 86;
+        var visibleCount = Math.Max(1, list.Height / rowHeight);
+        for (var i = 0; i < Math.Min(_launchers.Items.Count, visibleCount); i++)
+        {
+            var item = _launchers.Items[i];
+            var row = new Rectangle(list.X, list.Y + i * rowHeight, list.Width, rowHeight - 8);
+            DrawLauncherRow(g, row, item);
+            _itemAreas.Add((row, item));
+        }
+    }
+
+    private void DrawLauncherRow(Graphics g, Rectangle rect, LaunchItem item)
+    {
+        var selected = ReferenceEquals(item, _selectedItem);
+        var hot = ReferenceEquals(item, _hoverItem);
+        using (var brush = new SolidBrush(selected ? RowSelected : hot ? RowHot : RowFill))
+        {
+            g.FillRoundedRectangle(brush, rect, 7);
+        }
+
+        var iconRect = new Rectangle(rect.X + 14, rect.Y + 18, 42, 42);
+        var icon = GetLauncherIcon(item.Path);
+        if (icon is not null)
+        {
+            g.DrawImage(icon, iconRect);
+        }
+        else
+        {
+            DrawFallbackIcon(g, iconRect, item.Name);
+        }
+
+        TextRenderer.DrawText(
+            g,
+            item.Name,
+            ItemFont,
+            new Rectangle(rect.X + 70, rect.Y + 16, rect.Width - 84, 30),
+            selected ? Color.White : TextMain,
+            TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis);
+        TextRenderer.DrawText(
+            g,
+            item.Path,
+            NormalFont,
+            new Rectangle(rect.X + 70, rect.Y + 46, rect.Width - 84, 22),
+            selected ? Color.FromArgb(220, 230, 255) : TextSubtle,
+            TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis);
+    }
+
+    private Image? GetLauncherIcon(string path)
+    {
+        if (string.IsNullOrWhiteSpace(path))
+        {
+            return null;
+        }
+
+        if (_iconCache.TryGetValue(path, out var cached))
+        {
+            return cached;
+        }
+
+        var icon = ShellIconLoader.LoadLargeIcon(path);
+        if (icon is not null)
+        {
+            _iconCache[path] = icon;
+        }
+
+        return icon;
+    }
+
+    private static void DrawFallbackIcon(Graphics g, Rectangle rect, string name)
+    {
+        DrawRoundRect(g, rect, Accent, Accent, 8);
+        var text = string.IsNullOrWhiteSpace(name) ? "+" : name.Trim()[0].ToString().ToUpperInvariant();
+        TextRenderer.DrawText(g, text, ItemFont, rect, Color.White, TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis);
+    }
+
+    private static void DrawButton(Graphics g, Rectangle rect, string text, bool primary, bool enabled, bool hot)
+    {
+        var fill = !enabled
+            ? Color.FromArgb(38, 48, 62)
+            : primary
+                ? (hot ? Color.FromArgb(48, 126, 255) : Accent)
+                : (hot ? Color.FromArgb(62, 76, 96) : Color.FromArgb(44, 55, 72));
+        var border = primary && enabled ? fill : Color.FromArgb(84, 102, 126);
+        var textColor = enabled ? Color.White : Color.FromArgb(112, 126, 146);
+        DrawRoundRect(g, rect, fill, border, 6);
+        TextRenderer.DrawText(g, text, ButtonFont, rect, textColor, TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis);
+    }
+
+    private static void DrawRoundRect(Graphics g, Rectangle rect, Color fill, Color border, int radius)
+    {
+        using var path = RoundPath(rect, radius);
+        using var brush = new SolidBrush(fill);
+        using var pen = new Pen(border);
+        g.FillPath(brush, path);
+        g.DrawPath(pen, path);
+    }
+
+    private static GraphicsPath RoundPath(Rectangle rect, int radius)
+    {
+        var path = new GraphicsPath();
+        var diameter = radius * 2;
+        rect.Width -= 1;
+        rect.Height -= 1;
+        path.AddArc(rect.Left, rect.Top, diameter, diameter, 180, 90);
+        path.AddArc(rect.Right - diameter, rect.Top, diameter, diameter, 270, 90);
+        path.AddArc(rect.Right - diameter, rect.Bottom - diameter, diameter, diameter, 0, 90);
+        path.AddArc(rect.Left, rect.Bottom - diameter, diameter, diameter, 90, 90);
+        path.CloseFigure();
+        return path;
+    }
+
+    protected override void OnMouseMove(MouseEventArgs e)
+    {
+        var key = _hotspots.FirstOrDefault(item => item.Rect.Contains(e.Location)).Key;
+        var item = _itemAreas.FirstOrDefault(area => area.Rect.Contains(e.Location)).Item;
+        if (_hoverKey != key || !ReferenceEquals(_hoverItem, item))
+        {
+            _hoverKey = key;
+            _hoverItem = item;
+            Invalidate();
+        }
+
+        Cursor = key is not null || item is not null ? Cursors.Hand : Cursors.Default;
+        base.OnMouseMove(e);
+    }
+
+    protected override void OnMouseLeave(EventArgs e)
+    {
+        _hoverKey = null;
+        _hoverItem = null;
+        Cursor = Cursors.Default;
+        Invalidate();
+        base.OnMouseLeave(e);
+    }
+
+    protected override void OnMouseClick(MouseEventArgs e)
+    {
+        if (e.Button != MouseButtons.Left)
+        {
+            base.OnMouseClick(e);
+            return;
+        }
+
+        var item = _itemAreas.FirstOrDefault(area => area.Rect.Contains(e.Location)).Item;
+        if (item is not null)
+        {
+            _selectedItem = item;
+            Invalidate();
+            base.OnMouseClick(e);
+            return;
+        }
+
+        var key = _hotspots.FirstOrDefault(hotspot => hotspot.Rect.Contains(e.Location)).Key;
+        switch (key)
+        {
+            case "add":
+                AddRequested?.Invoke();
+                break;
+            case "edit" when _selectedItem is not null:
+                EditRequested?.Invoke(_selectedItem);
+                break;
+            case "delete" when _selectedItem is not null:
+                DeleteRequested?.Invoke(_selectedItem);
+                break;
+            case "open" when _selectedItem is not null:
+                OpenRequested?.Invoke(_selectedItem);
+                break;
+            case "pin":
+                PinRequested?.Invoke();
+                break;
+        }
+
+        base.OnMouseClick(e);
+    }
+
+    protected override void OnMouseDoubleClick(MouseEventArgs e)
+    {
+        var item = _itemAreas.FirstOrDefault(area => area.Rect.Contains(e.Location)).Item;
+        if (item is not null)
+        {
+            _selectedItem = item;
+            OpenRequested?.Invoke(item);
+        }
+
+        base.OnMouseDoubleClick(e);
+    }
+
+    protected override void OnDragEnter(DragEventArgs drgevent)
+    {
+        drgevent.Effect = CanAcceptDrop(drgevent) ? DragDropEffects.Copy : DragDropEffects.None;
+        base.OnDragEnter(drgevent);
+    }
+
+    protected override void OnDragOver(DragEventArgs drgevent)
+    {
+        drgevent.Effect = CanAcceptDrop(drgevent) ? DragDropEffects.Copy : DragDropEffects.None;
+        base.OnDragOver(drgevent);
+    }
+
+    protected override void OnDragDrop(DragEventArgs drgevent)
+    {
+        if (CanAcceptDrop(drgevent))
+        {
+            LauncherDropped?.Invoke(drgevent);
+        }
+
+        base.OnDragDrop(drgevent);
+    }
+
+    private bool CanAcceptDrop(DragEventArgs e)
+    {
+        return _launchers.Items.Count < _maxLaunchers && GetDroppedLauncherPath(e) is not null;
+    }
+
+    private static string? GetDroppedLauncherPath(DragEventArgs e)
+    {
+        if (e.Data?.GetDataPresent(DataFormats.FileDrop) == true
+            && e.Data.GetData(DataFormats.FileDrop) is string[] files
+            && files.Length > 0)
+        {
+            return files[0];
+        }
+
+        return e.Data?.GetDataPresent(DataFormats.Text) == true && e.Data.GetData(DataFormats.Text) is string path
+            ? path
+            : null;
+    }
+}
+
+internal sealed class StatsPageCanvas : Control
+{
+    private readonly AppConfig _config;
+    private readonly TodoData _todos;
+    private readonly ProjectData _projects;
+    private readonly LaunchData _launchers;
+
+    private static readonly Color Back = Color.FromArgb(22, 30, 42);
+    private static readonly Color CardFill = Color.FromArgb(118, 30, 40, 56);
+    private static readonly Color CardBorder = Color.FromArgb(72, 90, 112);
+    private static readonly Color TextMain = Color.FromArgb(238, 243, 249);
+    private static readonly Font HeaderFont = new("Microsoft YaHei UI", 18F, FontStyle.Regular);
+    private static readonly Font TitleFont = new("Microsoft YaHei UI", 12.5F, FontStyle.Regular);
+    private static readonly Font ValueFont = new("Microsoft YaHei UI", 34F, FontStyle.Bold);
+
+    public StatsPageCanvas(AppConfig config, TodoData todos, ProjectData projects, LaunchData launchers)
+    {
+        _config = config;
+        _todos = todos;
+        _projects = projects;
+        _launchers = launchers;
+        SetStyle(ControlStyles.AllPaintingInWmPaint | ControlStyles.UserPaint | ControlStyles.OptimizedDoubleBuffer | ControlStyles.ResizeRedraw | ControlStyles.SupportsTransparentBackColor, true);
+    }
+
+    protected override void OnPaint(PaintEventArgs e)
+    {
+        var g = e.Graphics;
+        g.SmoothingMode = SmoothingMode.AntiAlias;
+
+        using (var back = new SolidBrush(Back))
+        {
+            g.FillRectangle(back, ClientRectangle);
+        }
+
+        TextRenderer.DrawText(g, "统计分析", HeaderFont, new Rectangle(0, 0, Width, 70), TextMain, TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis);
+
+        var metrics = new (string Title, string Value)[]
+        {
+            ("桌面分类", _config.DesktopCategories.Count.ToString()),
+            ("任务总数", _todos.Items.Count.ToString()),
+            ("已完成", _todos.Items.Count(item => item.Done).ToString()),
+            ("项目数量", _projects.Projects.Count.ToString()),
+            ("项目事项", _projects.Projects.SelectMany(project => project.Items).Count().ToString()),
+            ("快捷启动", _launchers.Items.Count.ToString())
+        };
+
+        var area = new Rectangle(0, 122, Math.Max(1, Width - 10), Math.Max(1, Height - 148));
+        const int columns = 3;
+        const int rows = 2;
+        const int gapX = 18;
+        const int gapY = 16;
+        var cardWidth = Math.Max(1, (area.Width - gapX * (columns - 1)) / columns);
+        var cardHeight = Math.Max(1, (area.Height - gapY * (rows - 1)) / rows);
+
+        for (var i = 0; i < metrics.Length; i++)
+        {
+            var col = i % columns;
+            var row = i / columns;
+            var rect = new Rectangle(area.X + col * (cardWidth + gapX), area.Y + row * (cardHeight + gapY), cardWidth, cardHeight);
+            DrawMetricCard(g, rect, metrics[i].Title, metrics[i].Value);
+        }
+    }
+
+    private static void DrawMetricCard(Graphics g, Rectangle rect, string title, string value)
+    {
+        DrawRoundRect(g, rect, CardFill, CardBorder, 8);
+        TextRenderer.DrawText(g, title, TitleFont, new Rectangle(rect.X + 22, rect.Y + 12, rect.Width - 44, 38), TextMain, TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis);
+        TextRenderer.DrawText(g, value, ValueFont, rect, TextMain, TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis);
+    }
+
+    private static void DrawRoundRect(Graphics g, Rectangle rect, Color fill, Color border, int radius)
+    {
+        using var path = RoundPath(rect, radius);
+        using var brush = new SolidBrush(fill);
+        using var pen = new Pen(border);
+        g.FillPath(brush, path);
+        g.DrawPath(pen, path);
+    }
+
+    private static GraphicsPath RoundPath(Rectangle rect, int radius)
+    {
+        var path = new GraphicsPath();
+        var diameter = radius * 2;
+        rect.Width -= 1;
+        rect.Height -= 1;
+        path.AddArc(rect.Left, rect.Top, diameter, diameter, 180, 90);
+        path.AddArc(rect.Right - diameter, rect.Top, diameter, diameter, 270, 90);
+        path.AddArc(rect.Right - diameter, rect.Bottom - diameter, diameter, diameter, 0, 90);
+        path.AddArc(rect.Left, rect.Bottom - diameter, diameter, diameter, 90, 90);
+        path.CloseFigure();
+        return path;
+    }
+}
+
+internal sealed class SystemMonitorPageCanvas : Control
+{
+    private readonly AppConfig _config;
+    private readonly List<(Rectangle Rect, string Key)> _hotspots = new();
+    private readonly List<MonitorOption> _options;
+    private string? _hoverKey;
+
+    private static readonly Color Back = Color.FromArgb(22, 30, 42);
+    private static readonly Color CardFill = Color.FromArgb(118, 30, 40, 56);
+    private static readonly Color CardBorder = Color.FromArgb(72, 90, 112);
+    private static readonly Color TextMain = Color.FromArgb(238, 243, 249);
+    private static readonly Color TextSubtle = Color.FromArgb(155, 168, 186);
+    private static readonly Color Accent = Color.FromArgb(35, 107, 238);
+    private static readonly Font HeaderFont = new("Microsoft YaHei UI", 18F, FontStyle.Regular);
+    private static readonly Font TitleFont = new("Microsoft YaHei UI", 13F, FontStyle.Bold);
+    private static readonly Font NormalFont = new("Microsoft YaHei UI", 9.5F, FontStyle.Regular);
+    private static readonly Font ButtonFont = new("Microsoft YaHei UI", 9F, FontStyle.Regular);
+
+    public SystemMonitorPageCanvas(AppConfig config)
+    {
+        _config = config;
+        _options = new List<MonitorOption>
+        {
+            new("download", "下载速度", () => _config.DesktopSystemMonitorShowDownload, value => _config.DesktopSystemMonitorShowDownload = value),
+            new("upload", "上传速度", () => _config.DesktopSystemMonitorShowUpload, value => _config.DesktopSystemMonitorShowUpload = value),
+            new("memory", "内存", () => _config.DesktopSystemMonitorShowMemory, value => _config.DesktopSystemMonitorShowMemory = value),
+            new("cpu", "CPU", () => _config.DesktopSystemMonitorShowCpu, value => _config.DesktopSystemMonitorShowCpu = value),
+            new("diskIo", "磁盘读写", () => _config.DesktopSystemMonitorShowDiskIo, value => _config.DesktopSystemMonitorShowDiskIo = value),
+            new("diskSpace", "磁盘空间", () => _config.DesktopSystemMonitorShowDiskSpace, value => _config.DesktopSystemMonitorShowDiskSpace = value),
+            new("ping", "网络延迟", () => _config.DesktopSystemMonitorShowPing, value => _config.DesktopSystemMonitorShowPing = value),
+            new("uptime", "运行时长", () => _config.DesktopSystemMonitorShowUptime, value => _config.DesktopSystemMonitorShowUptime = value)
+        };
+        SetStyle(ControlStyles.AllPaintingInWmPaint | ControlStyles.UserPaint | ControlStyles.OptimizedDoubleBuffer | ControlStyles.ResizeRedraw | ControlStyles.SupportsTransparentBackColor, true);
+    }
+
+    public event Action? ShowWidgetRequested;
+    public event Action? CloseWidgetRequested;
+    public event Action? OptionsChanged;
+
+    protected override void OnPaint(PaintEventArgs e)
+    {
+        var g = e.Graphics;
+        g.SmoothingMode = SmoothingMode.AntiAlias;
+        _hotspots.Clear();
+
+        using (var back = new SolidBrush(Back))
+        {
+            g.FillRectangle(back, ClientRectangle);
+        }
+
+        TextRenderer.DrawText(g, "系统检测", HeaderFont, new Rectangle(0, 0, Width, 70), TextMain, TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis);
+
+        var showButton = new Rectangle(0, 76, 118, 34);
+        var closeButton = new Rectangle(showButton.Right + 10, showButton.Y, 88, 34);
+        DrawButton(g, showButton, "显示桌面组件", true, _hoverKey == "show");
+        DrawButton(g, closeButton, "关闭组件", false, _hoverKey == "close");
+        _hotspots.Add((showButton, "show"));
+        _hotspots.Add((closeButton, "close"));
+
+        var card = new Rectangle(0, 128, Math.Max(320, Width - 10), 292);
+        DrawRoundRect(g, card, CardFill, CardBorder, 10);
+        TextRenderer.DrawText(g, "系统检测组件", TitleFont, new Rectangle(card.X + 22, card.Y + 18, card.Width - 44, 34), TextMain, TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis);
+        TextRenderer.DrawText(
+            g,
+            "选择桌面组件需要显示的检测项；组件支持透明、移动、缩放和右键菜单。",
+            NormalFont,
+            new Rectangle(card.X + 22, card.Y + 58, card.Width - 44, 36),
+            TextSubtle,
+            TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis);
+
+        DrawOptions(g, new Rectangle(card.X + 22, card.Y + 110, card.Width - 44, card.Height - 132));
+    }
+
+    private void DrawOptions(Graphics g, Rectangle area)
+    {
+        var itemWidth = Math.Max(108, Math.Min(160, (area.Width - 28) / 4));
+        var itemHeight = 34;
+        var gapX = 24;
+        var gapY = 16;
+        var columns = Math.Max(1, (area.Width + gapX) / (itemWidth + gapX));
+
+        for (var i = 0; i < _options.Count; i++)
+        {
+            var option = _options[i];
+            var col = i % columns;
+            var row = i / columns;
+            var rect = new Rectangle(area.X + col * (itemWidth + gapX), area.Y + row * (itemHeight + gapY), itemWidth, itemHeight);
+            if (rect.Bottom > area.Bottom)
+            {
+                continue;
+            }
+
+            var hot = _hoverKey == option.Key;
+            if (hot)
+            {
+                using var hotBrush = new SolidBrush(Color.FromArgb(36, 58, 78));
+                g.FillRoundedRectangle(hotBrush, rect, 6);
+            }
+
+            var box = new Rectangle(rect.X + 2, rect.Y + 8, 18, 18);
+            DrawCheckBox(g, box, option.Get());
+            TextRenderer.DrawText(g, option.Text, NormalFont, new Rectangle(rect.X + 28, rect.Y, rect.Width - 28, rect.Height), TextMain, TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis);
+            _hotspots.Add((rect, option.Key));
+        }
+    }
+
+    private static void DrawButton(Graphics g, Rectangle rect, string text, bool primary, bool hot)
+    {
+        var fill = primary
+            ? (hot ? Color.FromArgb(48, 126, 255) : Accent)
+            : (hot ? Color.FromArgb(62, 76, 96) : Color.FromArgb(44, 55, 72));
+        var border = primary ? fill : Color.FromArgb(84, 102, 126);
+        DrawRoundRect(g, rect, fill, border, 6);
+        TextRenderer.DrawText(g, text, ButtonFont, rect, primary ? Color.White : TextMain, TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis);
+    }
+
+    private static void DrawCheckBox(Graphics g, Rectangle rect, bool isChecked)
+    {
+        DrawRoundRect(g, rect, isChecked ? Accent : Color.FromArgb(30, 40, 56), isChecked ? Accent : Color.FromArgb(110, 128, 152), 4);
+        if (!isChecked)
+        {
+            return;
+        }
+
+        using var pen = new Pen(Color.White, 2F)
+        {
+            StartCap = LineCap.Round,
+            EndCap = LineCap.Round
+        };
+        g.DrawLine(pen, rect.X + 4, rect.Y + 9, rect.X + 8, rect.Y + 13);
+        g.DrawLine(pen, rect.X + 8, rect.Y + 13, rect.Right - 4, rect.Y + 5);
+    }
+
+    private static void DrawRoundRect(Graphics g, Rectangle rect, Color fill, Color border, int radius)
+    {
+        using var path = RoundPath(rect, radius);
+        using var brush = new SolidBrush(fill);
+        using var pen = new Pen(border);
+        g.FillPath(brush, path);
+        g.DrawPath(pen, path);
+    }
+
+    private static GraphicsPath RoundPath(Rectangle rect, int radius)
+    {
+        var path = new GraphicsPath();
+        var diameter = radius * 2;
+        rect.Width -= 1;
+        rect.Height -= 1;
+        path.AddArc(rect.Left, rect.Top, diameter, diameter, 180, 90);
+        path.AddArc(rect.Right - diameter, rect.Top, diameter, diameter, 270, 90);
+        path.AddArc(rect.Right - diameter, rect.Bottom - diameter, diameter, diameter, 0, 90);
+        path.AddArc(rect.Left, rect.Bottom - diameter, diameter, diameter, 90, 90);
+        path.CloseFigure();
+        return path;
+    }
+
+    protected override void OnMouseMove(MouseEventArgs e)
+    {
+        var key = _hotspots.FirstOrDefault(item => item.Rect.Contains(e.Location)).Key;
+        if (_hoverKey != key)
+        {
+            _hoverKey = key;
+            Invalidate();
+        }
+
+        Cursor = key is null ? Cursors.Default : Cursors.Hand;
+        base.OnMouseMove(e);
+    }
+
+    protected override void OnMouseLeave(EventArgs e)
+    {
+        _hoverKey = null;
+        Cursor = Cursors.Default;
+        Invalidate();
+        base.OnMouseLeave(e);
+    }
+
+    protected override void OnMouseClick(MouseEventArgs e)
+    {
+        if (e.Button != MouseButtons.Left)
+        {
+            base.OnMouseClick(e);
+            return;
+        }
+
+        var key = _hotspots.FirstOrDefault(item => item.Rect.Contains(e.Location)).Key;
+        switch (key)
+        {
+            case "show":
+                ShowWidgetRequested?.Invoke();
+                break;
+            case "close":
+                CloseWidgetRequested?.Invoke();
+                break;
+            case { } optionKey:
+                var option = _options.FirstOrDefault(item => item.Key == optionKey);
+                if (option is not null)
+                {
+                    option.Set(!option.Get());
+                    OptionsChanged?.Invoke();
+                    Invalidate();
+                }
+                break;
+        }
+
+        base.OnMouseClick(e);
+    }
+
+    private sealed record MonitorOption(string Key, string Text, Func<bool> Get, Action<bool> Set);
+}
+
 internal sealed class DashboardCanvas : Control
 {
     private readonly ToolTip _todoToolTip = new()
@@ -20674,6 +23436,11 @@ internal static class GraphicsExtensions
         return path;
     }
 }
+
+
+
+
+
 
 
 

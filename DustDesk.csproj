@@ -1,12 +1,14 @@
-<Project Sdk="Microsoft.NET.Sdk">
+﻿<Project Sdk="Microsoft.NET.Sdk">
   <PropertyGroup>
     <OutputType>WinExe</OutputType>
     <TargetFramework>net8.0-windows</TargetFramework>
     <UseWindowsForms>true</UseWindowsForms>
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
+    <ApplicationHighDpiMode>PerMonitorV2</ApplicationHighDpiMode>
     <AssemblyName>DustDesk</AssemblyName>
     <RootNamespace>DustDesk</RootNamespace>
+    <Version>1.4.0</Version>
     <DefaultItemExcludes>$(DefaultItemExcludes);bin\**;obj\**;obj-resizable\**</DefaultItemExcludes>
   </PropertyGroup>
   <ItemGroup>
@@ -21,3 +23,4 @@
     <Compile Remove="tools\**\*.cs" />
   </ItemGroup>
 </Project>
+

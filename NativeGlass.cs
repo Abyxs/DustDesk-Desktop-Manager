@@ -95,6 +95,19 @@ internal static class NativeGlass
         }
     }
 
+    public static void ApplyDarkWindowFrame(IntPtr handle)
+    {
+        if (Environment.OSVersion.Version.Major < 10)
+        {
+            return;
+        }
+
+        var dark = 1;
+        _ = DwmSetWindowAttribute(handle, 20, ref dark, sizeof(int));
+        var corner = 2;
+        _ = DwmSetWindowAttribute(handle, 33, ref corner, sizeof(int));
+    }
+
     public static void BeginMove(IntPtr handle)
     {
         _ = ReleaseCapture();
