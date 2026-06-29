@@ -167,7 +167,6 @@ public sealed class MainForm : Form
             Shown += (_, _) => BeginInvoke(new Action(HideToTray));
         }
 
-        Shown += (_, _) => BeginInvoke(new Action(CheckForUpdatesOnStartup));
         Shown += (_, _) => BeginInvoke(new Action(CheckTodoReminders));
     }
 
@@ -530,22 +529,16 @@ public sealed class MainForm : Form
         _content.BackColor = BackColorMain;
         _content.Padding = new Padding(34, 0, 28, 26);
 
-        var chrome = new Panel
+        var chrome = new WindowChromeCanvas(
+            () => HideToTray(),
+            () => WindowState = WindowState == FormWindowState.Maximized ? FormWindowState.Normal : FormWindowState.Maximized,
+            () => WindowState = FormWindowState.Minimized)
         {
             Dock = DockStyle.Top,
             Height = 44,
             BackColor = Color.Transparent
         };
-        chrome.MouseDown += (_, e) =>
-        {
-            if (e.Button == MouseButtons.Left)
-            {
-                NativeGlass.BeginMove(Handle);
-            }
-        };
-        chrome.Controls.Add(CreateWindowDot(Color.FromArgb(255, 95, 86), (_, _) => HideToTray()));
-        chrome.Controls.Add(CreateWindowDot(Color.FromArgb(255, 189, 46), (_, _) => WindowState = WindowState == FormWindowState.Maximized ? FormWindowState.Normal : FormWindowState.Maximized));
-        chrome.Controls.Add(CreateWindowDot(Color.FromArgb(39, 201, 63), (_, _) => WindowState = FormWindowState.Minimized));
+        chrome.BeginMoveRequested += () => NativeGlass.BeginMove(Handle);
 
         var main = new Panel
         {
@@ -690,25 +683,6 @@ public sealed class MainForm : Form
             TextAlign = ContentAlignment.MiddleLeft
         });
         return panel;
-    }
-
-    private Control CreateWindowDot(Color color, EventHandler action)
-    {
-        var button = new Panel
-        {
-            Dock = DockStyle.Right,
-            Width = 40,
-            BackColor = Color.Transparent,
-            Cursor = Cursors.Hand
-        };
-        button.Paint += (_, e) =>
-        {
-            e.Graphics.SmoothingMode = SmoothingMode.AntiAlias;
-            using var brush = new SolidBrush(color);
-            e.Graphics.FillEllipse(brush, 8, 10, 24, 24);
-        };
-        button.Click += action;
-        return button;
     }
 
     private static Icon CreateAppIcon()
@@ -1177,6 +1151,21 @@ public sealed class MainForm : Form
             ShowDesktopOrganizerWidget();
         };
         dashboard.SearchRequested += ShowQuickSearch;
+        dashboard.RenameDisplayNameRequested += () =>
+        {
+            var currentName = string.IsNullOrWhiteSpace(_config.MainWindowDisplayName)
+                ? Environment.MachineName
+                : _config.MainWindowDisplayName.Trim();
+            var name = Prompt("修改名称", "显示名称", currentName);
+            if (string.IsNullOrWhiteSpace(name))
+            {
+                return;
+            }
+
+            _config.MainWindowDisplayName = name.Trim();
+            _store.SaveConfig(_config);
+            dashboard.Invalidate();
+        };
         _content.Controls.Add(dashboard);
     }
 
@@ -2008,6 +1997,7 @@ public sealed class MainForm : Form
         }
 
         _config.DesktopTodoWidget ??= new WidgetPlacement();
+        RepairDesktopWidgetPlacement(_config.DesktopTodoWidget, new Size(420, 360), 58, 56, 470);
         _config.DesktopTodoWidget.Visible = true;
         _store.SaveConfig(_config);
         _desktopTodoWidget.ShowAsDesktopWidget(_config.DesktopTodoWidget);
@@ -2049,6 +2039,7 @@ public sealed class MainForm : Form
         }
 
         _config.DesktopProjectWidget ??= new WidgetPlacement();
+        RepairDesktopWidgetPlacement(_config.DesktopProjectWidget, new Size(560, 340), 58, 80, 520);
         _config.DesktopProjectWidget.Visible = true;
         _store.SaveConfig(_config);
         _desktopProjectWidget.ShowAsDesktopWidget(_config.DesktopProjectWidget);
@@ -2059,6 +2050,53 @@ public sealed class MainForm : Form
                 WindowState = FormWindowState.Minimized;
             }));
         }
+    }
+
+    private static void RepairDesktopWidgetPlacement(WidgetPlacement placement, Size defaultSize, int collapsedHeight, int rightOffset, int topOffset)
+    {
+        var width = placement.Width > 0 ? placement.Width : defaultSize.Width;
+        var height = placement.Height > 0 ? placement.Height : (placement.IsCollapsed ? collapsedHeight : defaultSize.Height);
+        var bounds = new Rectangle(placement.X, placement.Y, Math.Max(1, width), Math.Max(1, height));
+        if (IsVisibleOnAnyScreen(bounds))
+        {
+            return;
+        }
+
+        var workArea = Screen.PrimaryScreen?.WorkingArea ?? new Rectangle(0, 0, 1280, 720);
+        width = placement.IsCollapsed ? Math.Max(defaultSize.Width, width) : defaultSize.Width;
+        height = placement.IsCollapsed ? collapsedHeight : defaultSize.Height;
+        placement.X = Math.Clamp(workArea.Right - width - rightOffset, workArea.Left + 8, Math.Max(workArea.Left + 8, workArea.Right - width - 8));
+        placement.Y = Math.Clamp(workArea.Top + topOffset, workArea.Top + 8, Math.Max(workArea.Top + 8, workArea.Bottom - height - 8));
+        placement.Width = width;
+        placement.Height = height;
+        if (placement.ExpandedWidth <= 0)
+        {
+            placement.ExpandedWidth = defaultSize.Width;
+        }
+
+        if (placement.ExpandedHeight <= collapsedHeight)
+        {
+            placement.ExpandedHeight = defaultSize.Height;
+        }
+    }
+
+    private static bool IsVisibleOnAnyScreen(Rectangle bounds)
+    {
+        if (bounds.Width <= 0 || bounds.Height <= 0)
+        {
+            return false;
+        }
+
+        foreach (var screen in Screen.AllScreens)
+        {
+            var intersection = Rectangle.Intersect(screen.WorkingArea, bounds);
+            if (intersection.Width >= Math.Min(80, bounds.Width) && intersection.Height >= Math.Min(40, bounds.Height))
+            {
+                return true;
+            }
+        }
+
+        return false;
     }
 
     private void SplitDesktopProjectWidget(ProjectBoard project)
@@ -5385,6 +5423,7 @@ public sealed class MainForm : Form
         };
         canvas.RestoreDesktopRequested += RestoreAllDesktopItems;
         canvas.ExportProjectsRequested += ExportProjectsToExcel;
+        canvas.CheckVersionRequested += CheckForUpdatesManually;
         canvas.IntroRequested += () => MessageBox.Show(
             this,
             "1. 桌面收纳：创建分类，把桌面文件拖入分类；从收纳拖出可还原。\n2. 工作记录、便签、项目、快捷启动都可添加为桌面组件。\n3. 首页搜索或 Ctrl+K 可快速检索文件、应用、项目和记录。\n4. Ctrl+Shift+K 唤起主窗口，Ctrl+Shift+D 唤起桌面收纳。",
@@ -6580,13 +6619,15 @@ public sealed class MainForm : Form
         }
     }
 
-    private async void CheckForUpdatesOnStartup()
+    private async void CheckForUpdatesManually()
     {
+        UseWaitCursor = true;
         try
         {
             var update = await UpdateChecker.CheckLatestAsync();
             if (update is null || IsDisposed)
             {
+                MessageBox.Show(this, $"当前已是最新版本 v{UpdateChecker.CurrentVersionText}。", "DustDesk 更新", MessageBoxButtons.OK, MessageBoxIcon.Information);
                 return;
             }
 
@@ -6601,8 +6642,13 @@ public sealed class MainForm : Form
                 await InstallUpdateAsync(update);
             }
         }
-        catch
+        catch (Exception ex)
         {
+            MessageBox.Show(this, $"检测更新失败：{ex.Message}", "DustDesk 更新", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+        }
+        finally
+        {
+            UseWaitCursor = false;
         }
     }
 
@@ -6823,6 +6869,11 @@ public sealed class MainForm : Form
         placement.Y = bounds.Y;
         placement.Width = Math.Max(1, bounds.Width);
         placement.Height = Math.Max(1, bounds.Height);
+        if (!placement.IsCollapsed)
+        {
+            placement.ExpandedWidth = placement.Width;
+            placement.ExpandedHeight = placement.Height;
+        }
         _store.SaveConfig(_config);
     }
 
@@ -7277,6 +7328,139 @@ internal sealed class BufferedPanel : Panel
     {
         DoubleBuffered = true;
         SetStyle(ControlStyles.AllPaintingInWmPaint | ControlStyles.OptimizedDoubleBuffer | ControlStyles.ResizeRedraw, true);
+    }
+}
+
+internal sealed class WindowChromeCanvas : Control
+{
+    private readonly Action _closeAction;
+    private readonly Action _maximizeAction;
+    private readonly Action _minimizeAction;
+    private string? _hoverKey;
+
+    private static readonly Color CloseColor = Color.FromArgb(255, 95, 86);
+    private static readonly Color MaximizeColor = Color.FromArgb(255, 189, 46);
+    private static readonly Color MinimizeColor = Color.FromArgb(39, 201, 63);
+
+    public WindowChromeCanvas(Action closeAction, Action maximizeAction, Action minimizeAction)
+    {
+        _closeAction = closeAction;
+        _maximizeAction = maximizeAction;
+        _minimizeAction = minimizeAction;
+        SetStyle(ControlStyles.AllPaintingInWmPaint | ControlStyles.UserPaint | ControlStyles.OptimizedDoubleBuffer | ControlStyles.ResizeRedraw | ControlStyles.SupportsTransparentBackColor, true);
+    }
+
+    public event Action? BeginMoveRequested;
+
+    protected override void OnPaint(PaintEventArgs e)
+    {
+        var g = e.Graphics;
+        g.SmoothingMode = SmoothingMode.AntiAlias;
+        DrawDot(g, DotRect("close"), CloseColor, _hoverKey == "close");
+        DrawDot(g, DotRect("maximize"), MaximizeColor, _hoverKey == "maximize");
+        DrawDot(g, DotRect("minimize"), MinimizeColor, _hoverKey == "minimize");
+        base.OnPaint(e);
+    }
+
+    protected override void OnMouseDown(MouseEventArgs e)
+    {
+        if (e.Button == MouseButtons.Left && HitKey(e.Location) is null)
+        {
+            BeginMoveRequested?.Invoke();
+            return;
+        }
+
+        base.OnMouseDown(e);
+    }
+
+    protected override void OnMouseClick(MouseEventArgs e)
+    {
+        if (e.Button == MouseButtons.Left)
+        {
+            switch (HitKey(e.Location))
+            {
+                case "close":
+                    _closeAction();
+                    return;
+                case "maximize":
+                    _maximizeAction();
+                    return;
+                case "minimize":
+                    _minimizeAction();
+                    return;
+            }
+        }
+
+        base.OnMouseClick(e);
+    }
+
+    protected override void OnMouseMove(MouseEventArgs e)
+    {
+        var key = HitKey(e.Location);
+        if (_hoverKey != key)
+        {
+            _hoverKey = key;
+            Cursor = key is null ? Cursors.Default : Cursors.Hand;
+            Invalidate();
+        }
+
+        base.OnMouseMove(e);
+    }
+
+    protected override void OnMouseLeave(EventArgs e)
+    {
+        if (_hoverKey is not null)
+        {
+            _hoverKey = null;
+            Cursor = Cursors.Default;
+            Invalidate();
+        }
+
+        base.OnMouseLeave(e);
+    }
+
+    private string? HitKey(Point point)
+    {
+        if (HitRect("close").Contains(point))
+        {
+            return "close";
+        }
+
+        if (HitRect("maximize").Contains(point))
+        {
+            return "maximize";
+        }
+
+        return HitRect("minimize").Contains(point) ? "minimize" : null;
+    }
+
+    private Rectangle DotRect(string key)
+    {
+        var index = key switch
+        {
+            "close" => 2,
+            "maximize" => 1,
+            _ => 0
+        };
+        return new Rectangle(Width - 28 - index * 40, 10, 24, 24);
+    }
+
+    private Rectangle HitRect(string key)
+    {
+        var dot = DotRect(key);
+        return new Rectangle(dot.X - 8, 0, 40, Height);
+    }
+
+    private static void DrawDot(Graphics g, Rectangle rect, Color color, bool hot)
+    {
+        if (hot)
+        {
+            using var glow = new SolidBrush(Color.FromArgb(42, color));
+            g.FillEllipse(glow, rect.X - 4, rect.Y - 4, rect.Width + 8, rect.Height + 8);
+        }
+
+        using var brush = new SolidBrush(color);
+        g.FillEllipse(brush, rect);
     }
 }
 
@@ -7791,15 +7975,27 @@ internal sealed class DesktopTodoWidgetForm : Form
     private const int WsExToolWindow = 0x00000080;
     private const int WsExAppWindow = 0x00040000;
     private const int WmContextMenu = 0x007B;
+    private const int CollapsedHeight = 58;
+    private static readonly Size ExpandedMinimumSize = new(300, 220);
+    private static readonly Size CollapsedMinimumSize = new(300, CollapsedHeight);
 
     private readonly DesktopTodoWidgetView _view;
     private readonly Action<Rectangle> _placementChanged;
     private readonly Action<bool> _transparentChanged;
+    private readonly System.Windows.Forms.Timer _autoCollapseTimer = new() { Interval = 10000 };
     private WidgetPlacement? _placement;
     private bool _transparent;
     private bool _positionLocked;
     private bool _attachedToDesktop;
     private bool _restoringPlacement;
+    private bool _autoCollapseEnabled;
+    private bool _collapsed;
+    private Rectangle _screenBounds;
+    private System.Windows.Forms.Timer? _manualDragTimer;
+    private Rectangle _manualDragStartBounds;
+    private Point _manualDragStartCursor;
+    private bool _manualResize;
+    private bool _manualDragging;
 
     public DesktopTodoWidgetForm(TodoData todos, Action<IWin32Window?> addRequested, Action todosChanged, Action manageRequested, Action<Rectangle> placementChanged, bool transparent, Action<bool> transparentChanged)
     {
@@ -7817,27 +8013,42 @@ internal sealed class DesktopTodoWidgetForm : Form
         ShowIcon = false;
         StartPosition = FormStartPosition.Manual;
         Size = new Size(420, 360);
-        MinimumSize = new Size(300, 220);
+        MinimumSize = ExpandedMinimumSize;
         BackColor = Color.FromArgb(20, 28, 40);
         _view.BeginMoveRequested += () =>
         {
             if (!_positionLocked)
             {
-                NativeGlass.BeginMove(Handle);
+                BeginManualDrag(resize: false);
             }
         };
         _view.BeginResizeRequested += () =>
         {
-            if (!_positionLocked)
+            if (!_positionLocked && !_collapsed)
             {
-                NativeGlass.BeginResize(Handle, 17);
+                BeginManualDrag(resize: true);
             }
         };
         _view.LockPositionChanged += SetPositionLocked;
+        _view.AutoCollapseChanged += value => SetAutoCollapseEnabled(value, save: true, collapse: true);
+        _view.ExpandCollapsedRequested += ExpandFromCollapsed;
+        _view.UserActivityDetected += ResetAutoCollapseTimer;
         _view.CloseRequested += Close;
         Controls.Add(_view);
+        _autoCollapseTimer.Tick += (_, _) =>
+        {
+            if (_autoCollapseEnabled && !_collapsed)
+            {
+                SetCollapsed(true);
+            }
+        };
         DesktopWidgetStyle.OpacityChanged += ApplyWidgetSkin;
-        FormClosed += (_, _) => DesktopWidgetStyle.OpacityChanged -= ApplyWidgetSkin;
+        FormClosed += (_, _) =>
+        {
+            _manualDragTimer?.Dispose();
+            _autoCollapseTimer.Dispose();
+            DesktopWidgetStyle.OpacityChanged -= ApplyWidgetSkin;
+        };
     }
 
     protected override CreateParams CreateParams
@@ -7866,11 +8077,15 @@ internal sealed class DesktopTodoWidgetForm : Form
     {
         _placement = placement;
         SetPositionLocked(placement?.Locked == true, save: false);
+        SetAutoCollapseEnabled(placement?.AutoCollapseEnabled == true || placement?.IsCollapsed == true, save: false, collapse: false);
+        SetCollapsed(_autoCollapseEnabled && placement?.IsCollapsed == true, save: false, resize: false);
         ApplyPlacementOrDefault(placement);
         Show();
         BringToFront();
         AttachToDesktopHost();
+        EnsureVisibleOnScreen();
         SavePlacement();
+        ResetAutoCollapseTimer();
     }
 
     public void RefreshTodos()
@@ -7959,12 +8174,14 @@ internal sealed class DesktopTodoWidgetForm : Form
         {
             if (placement is not null && placement.Width > 0 && placement.Height > 0)
             {
-                Bounds = new Rectangle(placement.X, placement.Y, Math.Max(MinimumSize.Width, placement.Width), Math.Max(MinimumSize.Height, placement.Height));
+                var width = Math.Max(MinimumSize.Width, placement.Width);
+                var height = _collapsed ? CollapsedHeight : Math.Max(ExpandedMinimumSize.Height, placement.Height);
+                SetScreenBounds(NormalizeScreenBounds(new Rectangle(placement.X, placement.Y, width, height)));
                 return;
             }
 
             var workArea = Screen.PrimaryScreen?.WorkingArea ?? new Rectangle(0, 0, 1280, 720);
-            Location = new Point(Math.Max(workArea.Left + 36, workArea.Right - Width - 56), workArea.Top + 470);
+            SetScreenBounds(NormalizeScreenBounds(new Rectangle(Math.Max(workArea.Left + 36, workArea.Right - Width - 56), workArea.Top + 470, Width, Height)));
         }
         finally
         {
@@ -7979,7 +8196,228 @@ internal sealed class DesktopTodoWidgetForm : Form
             return;
         }
 
-        _placementChanged(Bounds);
+        _placementChanged(NormalizeScreenBounds(GetScreenBounds()));
+    }
+
+    private void SetCollapsed(bool collapsed)
+    {
+        SetCollapsed(collapsed, save: true, resize: true);
+    }
+
+    private void SetCollapsed(bool collapsed, bool save, bool resize)
+    {
+        if (!collapsed && _placement is not null && _collapsed)
+        {
+            MinimumSize = ExpandedMinimumSize;
+        }
+
+        var current = GetScreenBounds();
+        if (collapsed && _placement is not null && !_collapsed && current.Height > CollapsedHeight)
+        {
+            _placement.ExpandedWidth = Math.Max(ExpandedMinimumSize.Width, current.Width);
+            _placement.ExpandedHeight = Math.Max(ExpandedMinimumSize.Height, current.Height);
+        }
+
+        _collapsed = collapsed;
+        MinimumSize = _collapsed ? CollapsedMinimumSize : ExpandedMinimumSize;
+        _view.SetCollapsed(_collapsed);
+        if (_placement is not null)
+        {
+            _placement.IsCollapsed = _collapsed;
+        }
+
+        if (resize && IsHandleCreated)
+        {
+            current = GetScreenBounds();
+            var width = _collapsed
+                ? Math.Max(CollapsedMinimumSize.Width, current.Width)
+                : Math.Max(ExpandedMinimumSize.Width, _placement?.ExpandedWidth > 0 ? _placement.ExpandedWidth : current.Width);
+            var height = _collapsed
+                ? CollapsedHeight
+                : Math.Max(ExpandedMinimumSize.Height, _placement?.ExpandedHeight > CollapsedHeight ? _placement.ExpandedHeight : 360);
+            SetScreenBounds(new Rectangle(current.X, current.Y, width, height));
+        }
+
+        if (save)
+        {
+            SavePlacement();
+        }
+
+        if (_collapsed)
+        {
+            _autoCollapseTimer.Stop();
+        }
+        else
+        {
+            ResetAutoCollapseTimer();
+        }
+    }
+
+    private void SetAutoCollapseEnabled(bool enabled, bool save, bool collapse)
+    {
+        _autoCollapseEnabled = enabled;
+        _view.SetAutoCollapseEnabled(_autoCollapseEnabled);
+        if (_placement is not null)
+        {
+            _placement.AutoCollapseEnabled = _autoCollapseEnabled;
+        }
+
+        if (_autoCollapseEnabled)
+        {
+            if (collapse)
+            {
+                SetCollapsed(true, save: false, resize: true);
+            }
+            else
+            {
+                ResetAutoCollapseTimer();
+            }
+        }
+        else
+        {
+            _autoCollapseTimer.Stop();
+            if (_collapsed)
+            {
+                SetCollapsed(false, save: false, resize: true);
+            }
+        }
+
+        if (save)
+        {
+            SavePlacement();
+        }
+    }
+
+    private void ExpandFromCollapsed()
+    {
+        SetCollapsed(!_collapsed);
+        ResetAutoCollapseTimer();
+    }
+
+    private void ResetAutoCollapseTimer()
+    {
+        if (!_autoCollapseEnabled || _collapsed || !Visible)
+        {
+            return;
+        }
+
+        _autoCollapseTimer.Stop();
+        _autoCollapseTimer.Start();
+    }
+
+    private void BeginManualDrag(bool resize)
+    {
+        if (_positionLocked || (resize && _collapsed))
+        {
+            return;
+        }
+
+        _manualDragStartCursor = Cursor.Position;
+        _manualDragStartBounds = GetScreenBounds();
+        _manualResize = resize;
+        _manualDragging = true;
+        _manualDragTimer ??= new System.Windows.Forms.Timer { Interval = 15 };
+        _manualDragTimer.Tick -= ManualDragTick;
+        _manualDragTimer.Tick += ManualDragTick;
+        _manualDragTimer.Start();
+    }
+
+    private void ManualDragTick(object? sender, EventArgs e)
+    {
+        if ((Control.MouseButtons & MouseButtons.Left) == 0)
+        {
+            StopManualDrag(save: true);
+            return;
+        }
+
+        var cursor = Cursor.Position;
+        var dx = cursor.X - _manualDragStartCursor.X;
+        var dy = cursor.Y - _manualDragStartCursor.Y;
+        var bounds = _manualResize
+            ? new Rectangle(
+                _manualDragStartBounds.X,
+                _manualDragStartBounds.Y,
+                Math.Max(MinimumSize.Width, _manualDragStartBounds.Width + dx),
+                Math.Max(MinimumSize.Height, _manualDragStartBounds.Height + dy))
+            : new Rectangle(
+                _manualDragStartBounds.X + dx,
+                _manualDragStartBounds.Y + dy,
+                _manualDragStartBounds.Width,
+                _manualDragStartBounds.Height);
+        SetScreenBounds(NormalizeScreenBounds(bounds));
+    }
+
+    private void StopManualDrag(bool save)
+    {
+        if (!_manualDragging)
+        {
+            return;
+        }
+
+        _manualDragTimer?.Stop();
+        _manualDragging = false;
+        if (save)
+        {
+            SavePlacement();
+        }
+    }
+
+    private Rectangle GetScreenBounds()
+    {
+        if (_screenBounds.Width > 0 && _screenBounds.Height > 0)
+        {
+            return _screenBounds;
+        }
+
+        return IsHandleCreated ? NativeGlass.GetWindowScreenBounds(Handle, Bounds) : Bounds;
+    }
+
+    private void TrackActualScreenBounds()
+    {
+        if (_restoringPlacement || !IsHandleCreated)
+        {
+            return;
+        }
+
+        var bounds = NativeGlass.GetWindowScreenBounds(Handle, Bounds);
+        if (bounds.Width > 0 && bounds.Height > 0)
+        {
+            _screenBounds = bounds;
+        }
+    }
+
+    private void SetScreenBounds(Rectangle bounds)
+    {
+        _screenBounds = bounds;
+        if (_attachedToDesktop && IsHandleCreated)
+        {
+            NativeGlass.SetDesktopChildScreenBounds(Handle, bounds);
+            return;
+        }
+
+        Bounds = bounds;
+    }
+
+    private void EnsureVisibleOnScreen()
+    {
+        var current = GetScreenBounds();
+        var target = NormalizeScreenBounds(current);
+        if (target != current)
+        {
+            SetScreenBounds(target);
+        }
+    }
+
+    private Rectangle NormalizeScreenBounds(Rectangle bounds)
+    {
+        var workArea = Screen.FromRectangle(bounds).WorkingArea;
+        var width = Math.Clamp(bounds.Width, MinimumSize.Width, Math.Max(MinimumSize.Width, workArea.Width - 16));
+        var height = Math.Clamp(bounds.Height, MinimumSize.Height, Math.Max(MinimumSize.Height, workArea.Height - 16));
+        var minX = workArea.Left + 8;
+        var minY = workArea.Top + 8;
+        var maxX = Math.Max(minX, workArea.Right - width - 8);
+        var maxY = Math.Max(minY, workArea.Bottom - height - 8);
+        return new Rectangle(Math.Clamp(bounds.X, minX, maxX), Math.Clamp(bounds.Y, minY, maxY), width, height);
     }
 
     private void UpdateRoundedRegion()
@@ -8037,6 +8475,7 @@ internal sealed class DesktopLauncherWidgetForm : Form
     private bool _launcherChromeExpanded;
     private bool _launcherChromeExpandedUp;
     private int _launcherChromeBaseHeight;
+    private Rectangle _screenBounds;
 
     public DesktopLauncherWidgetForm(LaunchData launchers, Action<Rectangle> placementChanged, Func<string, string?, bool, bool> pathDropped, bool transparent, Action<bool> transparentChanged, bool snap, Action<bool> snapChanged, bool showNames, Action<bool> showNamesChanged, int iconSize, Action<int> iconSizeChanged)
     {
@@ -8382,11 +8821,31 @@ internal sealed class DesktopLauncherWidgetForm : Form
 
     private Rectangle GetScreenBounds()
     {
+        if (_screenBounds.Width > 0 && _screenBounds.Height > 0)
+        {
+            return _screenBounds;
+        }
+
         return IsHandleCreated ? NativeGlass.GetWindowScreenBounds(Handle, Bounds) : Bounds;
+    }
+
+    private void TrackActualScreenBounds()
+    {
+        if (_restoringPlacement || !IsHandleCreated)
+        {
+            return;
+        }
+
+        var bounds = NativeGlass.GetWindowScreenBounds(Handle, Bounds);
+        if (bounds.Width > 0 && bounds.Height > 0)
+        {
+            _screenBounds = bounds;
+        }
     }
 
     private void SetScreenBounds(Rectangle bounds)
     {
+        _screenBounds = bounds;
         if (_attachedToDesktop && IsHandleCreated)
         {
             NativeGlass.SetDesktopChildScreenBounds(Handle, bounds);
@@ -8575,7 +9034,9 @@ internal sealed class DesktopLauncherWidgetView : Control
         SetMenuIcon(_transparentMenuItem, "zicaidan", "4-1.png");
         SetMenuIcon(_showNamesMenuItem, "zicaidan", "4-2.png");
         appearanceMenu.DropDownItems.Add(_transparentMenuItem);
-        appearanceMenu.DropDownItems.Add(DesktopWidgetStyle.CreateOpacityMenu());
+        var opacityMenu = DesktopWidgetStyle.CreateOpacityMenu();
+        SetMenuIcon(opacityMenu, "zicaidan", "4-4.png");
+        appearanceMenu.DropDownItems.Add(opacityMenu);
         appearanceMenu.DropDownItems.Add(_showNamesMenuItem);
         appearanceMenu.DropDownItems.Add(iconSizeMenu);
         _menu.Items.Add(appearanceMenu);
@@ -9132,6 +9593,7 @@ internal sealed class DesktopSystemMonitorWidgetForm : Form
     private bool _positionLocked;
     private bool _attachedToDesktop;
     private bool _restoringPlacement;
+    private Rectangle _screenBounds;
 
     public DesktopSystemMonitorWidgetForm(Action<Rectangle> placementChanged, bool transparent, Action<bool> transparentChanged, Func<bool> showDownload, Func<bool> showUpload, Func<bool> showMemory, Func<bool> showCpu, Func<bool> showDiskIo, Func<bool> showDiskSpace, Func<bool> showPing, Func<bool> showUptime)
     {
@@ -9320,11 +9782,31 @@ internal sealed class DesktopSystemMonitorWidgetForm : Form
 
     private Rectangle GetScreenBounds()
     {
+        if (_screenBounds.Width > 0 && _screenBounds.Height > 0)
+        {
+            return _screenBounds;
+        }
+
         return IsHandleCreated ? NativeGlass.GetWindowScreenBounds(Handle, Bounds) : Bounds;
+    }
+
+    private void TrackActualScreenBounds()
+    {
+        if (_restoringPlacement || !IsHandleCreated)
+        {
+            return;
+        }
+
+        var bounds = NativeGlass.GetWindowScreenBounds(Handle, Bounds);
+        if (bounds.Width > 0 && bounds.Height > 0)
+        {
+            _screenBounds = bounds;
+        }
     }
 
     private void SetScreenBounds(Rectangle bounds)
     {
+        _screenBounds = bounds;
         if (_attachedToDesktop && IsHandleCreated)
         {
             NativeGlass.SetDesktopChildScreenBounds(Handle, bounds);
@@ -9494,7 +9976,9 @@ internal sealed class DesktopSystemMonitorWidgetView : Control
         SetMenuIcon(appearanceMenu, "zicaidan", "4.png");
         SetMenuIcon(_transparentMenuItem, "zicaidan", "4-1.png");
         appearanceMenu.DropDownItems.Add(_transparentMenuItem);
-        appearanceMenu.DropDownItems.Add(DesktopWidgetStyle.CreateOpacityMenu());
+        var opacityMenu = DesktopWidgetStyle.CreateOpacityMenu();
+        SetMenuIcon(opacityMenu, "zicaidan", "4-4.png");
+        appearanceMenu.DropDownItems.Add(opacityMenu);
         _menu.Items.Add(appearanceMenu);
         _menu.Items.Add(new ToolStripSeparator());
         var settingsMenuItem = _menu.Items.Add("设置中心", null, (_, _) => ManageRequested?.Invoke());
@@ -10158,15 +10642,27 @@ internal sealed class DesktopProjectWidgetForm : Form
     private const int WsExToolWindow = 0x00000080;
     private const int WsExAppWindow = 0x00040000;
     private const int WmContextMenu = 0x007B;
+    private const int CollapsedHeight = 58;
+    private static readonly Size ExpandedMinimumSize = new(380, 240);
+    private static readonly Size CollapsedMinimumSize = new(380, CollapsedHeight);
 
     private readonly DesktopProjectWidgetView _view;
     private readonly Action<Rectangle> _placementChanged;
     private readonly Action<bool> _transparentChanged;
+    private readonly System.Windows.Forms.Timer _autoCollapseTimer = new() { Interval = 10000 };
     private WidgetPlacement? _placement;
     private bool _transparent;
     private bool _positionLocked;
     private bool _attachedToDesktop;
     private bool _restoringPlacement;
+    private bool _autoCollapseEnabled;
+    private bool _collapsed;
+    private Rectangle _screenBounds;
+    private System.Windows.Forms.Timer? _manualDragTimer;
+    private Rectangle _manualDragStartBounds;
+    private Point _manualDragStartCursor;
+    private bool _manualResize;
+    private bool _manualDragging;
 
     public DesktopProjectWidgetForm(Func<IEnumerable<ProjectBoard>> projectProvider, Action<Rectangle> placementChanged, bool transparent, Action<bool> transparentChanged, Action projectsChanged)
     {
@@ -10184,29 +10680,44 @@ internal sealed class DesktopProjectWidgetForm : Form
         ShowIcon = false;
         StartPosition = FormStartPosition.Manual;
         Size = new Size(560, 340);
-        MinimumSize = new Size(380, 240);
+        MinimumSize = ExpandedMinimumSize;
         BackColor = Color.FromArgb(20, 28, 40);
         _view.BeginMoveRequested += () =>
         {
             if (!_positionLocked)
             {
-                NativeGlass.BeginMove(Handle);
+                BeginManualDrag(resize: false);
             }
         };
         _view.BeginResizeRequested += () =>
         {
-            if (!_positionLocked)
+            if (!_positionLocked && !_collapsed)
             {
-                NativeGlass.BeginResize(Handle, 17);
+                BeginManualDrag(resize: true);
             }
         };
         _view.CloseRequested += Close;
         _view.ManageRequested += () => ManageRequested?.Invoke();
         _view.SplitRequested += project => SplitRequested?.Invoke(project);
         _view.LockPositionChanged += SetPositionLocked;
+        _view.AutoCollapseChanged += value => SetAutoCollapseEnabled(value, save: true, collapse: true);
+        _view.ExpandCollapsedRequested += ExpandFromCollapsed;
+        _view.UserActivityDetected += ResetAutoCollapseTimer;
         Controls.Add(_view);
+        _autoCollapseTimer.Tick += (_, _) =>
+        {
+            if (_autoCollapseEnabled && !_collapsed)
+            {
+                SetCollapsed(true);
+            }
+        };
         DesktopWidgetStyle.OpacityChanged += ApplyWidgetSkin;
-        FormClosed += (_, _) => DesktopWidgetStyle.OpacityChanged -= ApplyWidgetSkin;
+        FormClosed += (_, _) =>
+        {
+            _manualDragTimer?.Dispose();
+            _autoCollapseTimer.Dispose();
+            DesktopWidgetStyle.OpacityChanged -= ApplyWidgetSkin;
+        };
     }
 
     public event Action? ManageRequested;
@@ -10238,11 +10749,15 @@ internal sealed class DesktopProjectWidgetForm : Form
     {
         _placement = placement;
         SetPositionLocked(placement?.Locked == true, save: false);
+        SetAutoCollapseEnabled(placement?.AutoCollapseEnabled == true || placement?.IsCollapsed == true, save: false, collapse: false);
+        SetCollapsed(_autoCollapseEnabled && placement?.IsCollapsed == true, save: false, resize: false);
         ApplyPlacementOrDefault(placement);
         Show();
         BringToFront();
         AttachToDesktopHost();
+        EnsureVisibleOnScreen();
         SavePlacement();
+        ResetAutoCollapseTimer();
     }
 
     public void RefreshProjects()
@@ -10331,12 +10846,14 @@ internal sealed class DesktopProjectWidgetForm : Form
         {
             if (placement is not null && placement.Width > 0 && placement.Height > 0)
             {
-                Bounds = new Rectangle(placement.X, placement.Y, Math.Max(MinimumSize.Width, placement.Width), Math.Max(MinimumSize.Height, placement.Height));
+                var width = Math.Max(MinimumSize.Width, placement.Width);
+                var height = _collapsed ? CollapsedHeight : Math.Max(ExpandedMinimumSize.Height, placement.Height);
+                SetScreenBounds(NormalizeScreenBounds(new Rectangle(placement.X, placement.Y, width, height)));
                 return;
             }
 
             var workArea = Screen.PrimaryScreen?.WorkingArea ?? new Rectangle(0, 0, 1280, 720);
-            Location = new Point(Math.Max(workArea.Left + 40, workArea.Right - Width - 80), workArea.Top + 520);
+            SetScreenBounds(NormalizeScreenBounds(new Rectangle(Math.Max(workArea.Left + 40, workArea.Right - Width - 80), workArea.Top + 520, Width, Height)));
         }
         finally
         {
@@ -10351,7 +10868,223 @@ internal sealed class DesktopProjectWidgetForm : Form
             return;
         }
 
-        _placementChanged(Bounds);
+        _placementChanged(NormalizeScreenBounds(GetScreenBounds()));
+    }
+
+    private void SetCollapsed(bool collapsed)
+    {
+        SetCollapsed(collapsed, save: true, resize: true);
+    }
+
+    private void SetCollapsed(bool collapsed, bool save, bool resize)
+    {
+        var current = GetScreenBounds();
+        if (collapsed && _placement is not null && !_collapsed && current.Height > CollapsedHeight)
+        {
+            _placement.ExpandedWidth = Math.Max(ExpandedMinimumSize.Width, current.Width);
+            _placement.ExpandedHeight = Math.Max(ExpandedMinimumSize.Height, current.Height);
+        }
+
+        _collapsed = collapsed;
+        MinimumSize = _collapsed ? CollapsedMinimumSize : ExpandedMinimumSize;
+        _view.SetCollapsed(_collapsed);
+        if (_placement is not null)
+        {
+            _placement.IsCollapsed = _collapsed;
+        }
+
+        if (resize && IsHandleCreated)
+        {
+            current = GetScreenBounds();
+            var width = _collapsed
+                ? Math.Max(CollapsedMinimumSize.Width, current.Width)
+                : Math.Max(ExpandedMinimumSize.Width, _placement?.ExpandedWidth > 0 ? _placement.ExpandedWidth : current.Width);
+            var height = _collapsed
+                ? CollapsedHeight
+                : Math.Max(ExpandedMinimumSize.Height, _placement?.ExpandedHeight > CollapsedHeight ? _placement.ExpandedHeight : 340);
+            SetScreenBounds(new Rectangle(current.X, current.Y, width, height));
+        }
+
+        if (save)
+        {
+            SavePlacement();
+        }
+
+        if (_collapsed)
+        {
+            _autoCollapseTimer.Stop();
+        }
+        else
+        {
+            ResetAutoCollapseTimer();
+        }
+    }
+
+    private void SetAutoCollapseEnabled(bool enabled, bool save, bool collapse)
+    {
+        _autoCollapseEnabled = enabled;
+        _view.SetAutoCollapseEnabled(_autoCollapseEnabled);
+        if (_placement is not null)
+        {
+            _placement.AutoCollapseEnabled = _autoCollapseEnabled;
+        }
+
+        if (_autoCollapseEnabled)
+        {
+            if (collapse)
+            {
+                SetCollapsed(true, save: false, resize: true);
+            }
+            else
+            {
+                ResetAutoCollapseTimer();
+            }
+        }
+        else
+        {
+            _autoCollapseTimer.Stop();
+            if (_collapsed)
+            {
+                SetCollapsed(false, save: false, resize: true);
+            }
+        }
+
+        if (save)
+        {
+            SavePlacement();
+        }
+    }
+
+    private void ExpandFromCollapsed()
+    {
+        SetCollapsed(!_collapsed);
+        ResetAutoCollapseTimer();
+    }
+
+    private void ResetAutoCollapseTimer()
+    {
+        if (!_autoCollapseEnabled || _collapsed || !Visible)
+        {
+            return;
+        }
+
+        _autoCollapseTimer.Stop();
+        _autoCollapseTimer.Start();
+    }
+
+    private void BeginManualDrag(bool resize)
+    {
+        if (_positionLocked || (resize && _collapsed))
+        {
+            return;
+        }
+
+        _manualDragStartCursor = Cursor.Position;
+        _manualDragStartBounds = GetScreenBounds();
+        _manualResize = resize;
+        _manualDragging = true;
+        _manualDragTimer ??= new System.Windows.Forms.Timer { Interval = 15 };
+        _manualDragTimer.Tick -= ManualDragTick;
+        _manualDragTimer.Tick += ManualDragTick;
+        _manualDragTimer.Start();
+    }
+
+    private void ManualDragTick(object? sender, EventArgs e)
+    {
+        if ((Control.MouseButtons & MouseButtons.Left) == 0)
+        {
+            StopManualDrag(save: true);
+            return;
+        }
+
+        var cursor = Cursor.Position;
+        var dx = cursor.X - _manualDragStartCursor.X;
+        var dy = cursor.Y - _manualDragStartCursor.Y;
+        var bounds = _manualResize
+            ? new Rectangle(
+                _manualDragStartBounds.X,
+                _manualDragStartBounds.Y,
+                Math.Max(MinimumSize.Width, _manualDragStartBounds.Width + dx),
+                Math.Max(MinimumSize.Height, _manualDragStartBounds.Height + dy))
+            : new Rectangle(
+                _manualDragStartBounds.X + dx,
+                _manualDragStartBounds.Y + dy,
+                _manualDragStartBounds.Width,
+                _manualDragStartBounds.Height);
+        SetScreenBounds(NormalizeScreenBounds(bounds));
+    }
+
+    private void StopManualDrag(bool save)
+    {
+        if (!_manualDragging)
+        {
+            return;
+        }
+
+        _manualDragTimer?.Stop();
+        _manualDragging = false;
+        if (save)
+        {
+            SavePlacement();
+        }
+    }
+
+    private Rectangle GetScreenBounds()
+    {
+        if (_screenBounds.Width > 0 && _screenBounds.Height > 0)
+        {
+            return _screenBounds;
+        }
+
+        return IsHandleCreated ? NativeGlass.GetWindowScreenBounds(Handle, Bounds) : Bounds;
+    }
+
+    private void TrackActualScreenBounds()
+    {
+        if (_restoringPlacement || !IsHandleCreated)
+        {
+            return;
+        }
+
+        var bounds = NativeGlass.GetWindowScreenBounds(Handle, Bounds);
+        if (bounds.Width > 0 && bounds.Height > 0)
+        {
+            _screenBounds = bounds;
+        }
+    }
+
+    private void SetScreenBounds(Rectangle bounds)
+    {
+        _screenBounds = bounds;
+        if (_attachedToDesktop && IsHandleCreated)
+        {
+            NativeGlass.SetDesktopChildScreenBounds(Handle, bounds);
+            return;
+        }
+
+        Bounds = bounds;
+    }
+
+    private void EnsureVisibleOnScreen()
+    {
+        var current = GetScreenBounds();
+        var target = NormalizeScreenBounds(current);
+        if (target != current)
+        {
+            SetScreenBounds(target);
+        }
+    }
+
+    private Rectangle NormalizeScreenBounds(Rectangle bounds)
+    {
+        var workArea = Screen.FromRectangle(bounds).WorkingArea;
+        var width = Math.Clamp(bounds.Width, MinimumSize.Width, Math.Max(MinimumSize.Width, workArea.Width - 16));
+        var height = Math.Clamp(bounds.Height, MinimumSize.Height, Math.Max(MinimumSize.Height, workArea.Height - 16));
+        var minX = workArea.Left + 8;
+        var minY = workArea.Top + 8;
+        var maxX = Math.Max(minX, workArea.Right - width - 8);
+        var maxY = Math.Max(minY, workArea.Bottom - height - 8);
+        return new Rectangle(Math.Clamp(bounds.X, minX, maxX), Math.Clamp(bounds.Y, minY, maxY), width, height);
     }
 
     private void UpdateRoundedRegion()
@@ -10390,6 +11123,7 @@ internal sealed class DesktopProjectWidgetView : Control
     private readonly ToolStripMenuItem _transparentMenuItem = new("透明");
     private readonly ToolStripMenuItem _splitMenuItem = new("拆分为区域");
     private readonly ToolStripMenuItem _lockPositionMenuItem = new("锁定位置");
+    private readonly ToolStripMenuItem _autoCollapseMenuItem = new("折叠");
     private readonly ContextMenuStrip _projectMenu = new() { ShowImageMargin = true };
     private readonly ContextMenuStrip _phaseMenu = new() { ShowImageMargin = true };
     private readonly System.Windows.Forms.Timer _menuDismissTimer = new() { Interval = 40 };
@@ -10406,6 +11140,7 @@ internal sealed class DesktopProjectWidgetView : Control
     private Image? _projectIcon;
     private bool _transparent;
     private bool _positionLocked;
+    private bool _collapsed;
     private int _selectedIndex;
 
     private static readonly Color CardFill = Color.FromArgb(222, 24, 34, 48);
@@ -10469,6 +11204,10 @@ internal sealed class DesktopProjectWidgetView : Control
         };
         SetMenuIcon(_lockPositionMenuItem, "zicaidan", "2-4.png");
         layoutMenu.DropDownItems.Add(_lockPositionMenuItem);
+        _autoCollapseMenuItem.CheckOnClick = true;
+        _autoCollapseMenuItem.Click += (_, _) => AutoCollapseChanged?.Invoke(_autoCollapseMenuItem.Checked);
+        SetMenuIcon(_autoCollapseMenuItem, "zicaidan", "2-5.png");
+        layoutMenu.DropDownItems.Add(_autoCollapseMenuItem);
         _menu.Items.Add(layoutMenu);
         var componentMenu = new ToolStripMenuItem("组件管理");
         SetMenuIcon(componentMenu, "zicaidan", "3.png");
@@ -10479,7 +11218,9 @@ internal sealed class DesktopProjectWidgetView : Control
         SetMenuIcon(appearanceMenu, "zicaidan", "4.png");
         SetMenuIcon(_transparentMenuItem, "zicaidan", "4-1.png");
         appearanceMenu.DropDownItems.Add(_transparentMenuItem);
-        appearanceMenu.DropDownItems.Add(DesktopWidgetStyle.CreateOpacityMenu());
+        var opacityMenu = DesktopWidgetStyle.CreateOpacityMenu();
+        SetMenuIcon(opacityMenu, "zicaidan", "4-4.png");
+        appearanceMenu.DropDownItems.Add(opacityMenu);
         _menu.Items.Add(appearanceMenu);
         _menu.Items.Add(new ToolStripSeparator());
         var settingsMenuItem = _menu.Items.Add("设置中心", null, (_, _) => ManageRequested?.Invoke());
@@ -10572,6 +11313,9 @@ internal sealed class DesktopProjectWidgetView : Control
     public event Action? ManageRequested;
     public event Action<ProjectBoard>? SplitRequested;
     public event Action<bool>? LockPositionChanged;
+    public event Action<bool>? AutoCollapseChanged;
+    public event Action? ExpandCollapsedRequested;
+    public event Action? UserActivityDetected;
 
     public void SetPositionLocked(bool locked)
     {
@@ -10584,6 +11328,18 @@ internal sealed class DesktopProjectWidgetView : Control
     public void ShowProjectMenu(Point location)
     {
         _menu.Show(this, location);
+    }
+
+    public void SetCollapsed(bool collapsed)
+    {
+        _collapsed = collapsed;
+        Invalidate();
+    }
+
+    public void SetAutoCollapseEnabled(bool enabled)
+    {
+        _autoCollapseMenuItem.Checked = enabled;
+        _autoCollapseMenuItem.Text = enabled ? "折叠：开启" : "折叠：关闭";
     }
 
     private void SetMenuIcon(ToolStripItem item, params string[] imageParts)
@@ -10684,13 +11440,32 @@ internal sealed class DesktopProjectWidgetView : Control
 
     protected override void OnMouseDown(MouseEventArgs e)
     {
+        UserActivityDetected?.Invoke();
+        if (_collapsed)
+        {
+            if (_settingsRect.Contains(e.Location))
+            {
+                _menu.Show(this, _settingsRect.Left, _settingsRect.Bottom + 4);
+                return;
+            }
+
+            if (e.Button == MouseButtons.Left && e.Y <= 52)
+            {
+                BeginMoveRequested?.Invoke();
+                return;
+            }
+
+            base.OnMouseDown(e);
+            return;
+        }
+
         if (e.Button != MouseButtons.Left && e.Button != MouseButtons.Right)
         {
             base.OnMouseDown(e);
             return;
         }
 
-        if (_resizeRect.Contains(e.Location))
+        if (!_collapsed && _resizeRect.Contains(e.Location))
         {
             BeginResizeRequested?.Invoke();
             return;
@@ -10740,6 +11515,17 @@ internal sealed class DesktopProjectWidgetView : Control
         base.OnMouseDown(e);
     }
 
+    protected override void OnMouseDoubleClick(MouseEventArgs e)
+    {
+        if (e.Button == MouseButtons.Left && e.Y <= 52 && !_settingsRect.Contains(e.Location))
+        {
+            ExpandCollapsedRequested?.Invoke();
+            return;
+        }
+
+        base.OnMouseDoubleClick(e);
+    }
+
     protected override void WndProc(ref Message m)
     {
         if (m.Msg == WmContextMenu)
@@ -10753,8 +11539,9 @@ internal sealed class DesktopProjectWidgetView : Control
 
     protected override void OnMouseMove(MouseEventArgs e)
     {
-        Cursor = _resizeRect.Contains(e.Location) ? Cursors.SizeNWSE
-            : _settingsRect.Contains(e.Location) || _projectAreas.Any(item => item.Rect.Contains(e.Location)) || _phaseAreas.Any(item => item.Rect.Contains(e.Location)) ? Cursors.Hand
+        UserActivityDetected?.Invoke();
+        Cursor = !_collapsed && _resizeRect.Contains(e.Location) ? Cursors.SizeNWSE
+            : _settingsRect.Contains(e.Location) || (!_collapsed && (_projectAreas.Any(item => item.Rect.Contains(e.Location)) || _phaseAreas.Any(item => item.Rect.Contains(e.Location)))) ? Cursors.Hand
             : Cursors.Default;
         base.OnMouseMove(e);
     }
@@ -10769,6 +11556,11 @@ internal sealed class DesktopProjectWidgetView : Control
         var projects = Projects();
 
         var card = new Rectangle(0, 0, Width, Height);
+        if (card.Width < 220 || card.Height < 52)
+        {
+            return;
+        }
+
         FillRound(g, card, _transparent ? DesktopWidgetStyle.CardFill : CardFill, 10);
         DrawRound(g, new Rectangle(0, 0, Width - 1, Height - 1), _transparent ? DesktopWidgetStyle.BorderColor : CardBorder, 10);
 
@@ -10791,6 +11583,11 @@ internal sealed class DesktopProjectWidgetView : Control
         else
         {
             DrawGearIcon(g, new Rectangle(_settingsRect.X + 4, _settingsRect.Y + 4, 32, 32), Color.FromArgb(82, 168, 255));
+        }
+
+        if (_collapsed)
+        {
+            return;
         }
 
         if (projects.Count == 0)
@@ -11096,6 +11893,7 @@ internal sealed class DesktopTodoWidgetView : Control
     private readonly ContextMenuStrip _menu;
     private readonly ToolStripMenuItem _transparentMenuItem = new("透明");
     private readonly ToolStripMenuItem _lockPositionMenuItem = new("锁定位置");
+    private readonly ToolStripMenuItem _autoCollapseMenuItem = new("折叠");
     private readonly List<Image> _menuItemImages = new();
     private readonly System.Windows.Forms.Timer _menuDismissTimer = new() { Interval = 40 };
     private readonly System.Windows.Forms.Timer _clockTimer = new() { Interval = 30000 };
@@ -11113,6 +11911,7 @@ internal sealed class DesktopTodoWidgetView : Control
     private Rectangle _completedRect;
     private Rectangle _resizeRect;
     private string? _hoverKey;
+    private bool _collapsed;
 
     private static readonly Color CardFill = Color.FromArgb(222, 24, 34, 48);
     private static readonly Color CardBorder = Color.FromArgb(96, 104, 130, 156);
@@ -11157,6 +11956,10 @@ internal sealed class DesktopTodoWidgetView : Control
         };
         SetMenuIcon(_lockPositionMenuItem, "zicaidan", "2-4.png");
         layoutMenu.DropDownItems.Add(_lockPositionMenuItem);
+        _autoCollapseMenuItem.CheckOnClick = true;
+        _autoCollapseMenuItem.Click += (_, _) => AutoCollapseChanged?.Invoke(_autoCollapseMenuItem.Checked);
+        SetMenuIcon(_autoCollapseMenuItem, "zicaidan", "2-5.png");
+        layoutMenu.DropDownItems.Add(_autoCollapseMenuItem);
         _menu.Items.Add(layoutMenu);
         var componentMenu = new ToolStripMenuItem("组件管理");
         SetMenuIcon(componentMenu, "zicaidan", "3.png");
@@ -11167,7 +11970,9 @@ internal sealed class DesktopTodoWidgetView : Control
         SetMenuIcon(appearanceMenu, "zicaidan", "4.png");
         SetMenuIcon(_transparentMenuItem, "zicaidan", "4-1.png");
         appearanceMenu.DropDownItems.Add(_transparentMenuItem);
-        appearanceMenu.DropDownItems.Add(DesktopWidgetStyle.CreateOpacityMenu());
+        var opacityMenu = DesktopWidgetStyle.CreateOpacityMenu();
+        SetMenuIcon(opacityMenu, "zicaidan", "4-4.png");
+        appearanceMenu.DropDownItems.Add(opacityMenu);
         _menu.Items.Add(appearanceMenu);
         _menu.Items.Add(new ToolStripSeparator());
         var settingsMenuItem = _menu.Items.Add("设置中心", null, (_, _) => _manageRequested());
@@ -11184,6 +11989,9 @@ internal sealed class DesktopTodoWidgetView : Control
     public event Action? BeginResizeRequested;
     public event Action? CloseRequested;
     public event Action<bool>? LockPositionChanged;
+    public event Action<bool>? AutoCollapseChanged;
+    public event Action? ExpandCollapsedRequested;
+    public event Action? UserActivityDetected;
 
     public void SetPositionLocked(bool locked)
     {
@@ -11191,6 +11999,18 @@ internal sealed class DesktopTodoWidgetView : Control
         _lockPositionMenuItem.Checked = locked;
         _lockPositionMenuItem.Text = locked ? "已锁定" : "锁定位置";
         SetMenuIcon(_lockPositionMenuItem, "zicaidan", _positionLocked ? "2-3.png" : "2-4.png");
+    }
+
+    public void SetCollapsed(bool collapsed)
+    {
+        _collapsed = collapsed;
+        Invalidate();
+    }
+
+    public void SetAutoCollapseEnabled(bool enabled)
+    {
+        _autoCollapseMenuItem.Checked = enabled;
+        _autoCollapseMenuItem.Text = enabled ? "折叠：开启" : "折叠：关闭";
     }
 
     private void SetMenuIcon(ToolStripItem item, params string[] imageParts)
@@ -11267,6 +12087,25 @@ internal sealed class DesktopTodoWidgetView : Control
 
     protected override void OnMouseDown(MouseEventArgs e)
     {
+        UserActivityDetected?.Invoke();
+        if (_collapsed)
+        {
+            if (_settingsRect.Contains(e.Location))
+            {
+                _menu.Show(this, _settingsRect.Left, _settingsRect.Bottom + 4);
+                return;
+            }
+
+            if (e.Button == MouseButtons.Left && _headerRect.Contains(e.Location))
+            {
+                BeginMoveRequested?.Invoke();
+                return;
+            }
+
+            base.OnMouseDown(e);
+            return;
+        }
+
         if (e.Button == MouseButtons.Right)
         {
             var rowHit = _rowAreas.FirstOrDefault(item => item.Rect.Contains(e.Location));
@@ -11284,7 +12123,7 @@ internal sealed class DesktopTodoWidgetView : Control
             return;
         }
 
-        if (_resizeRect.Contains(e.Location))
+        if (!_collapsed && _resizeRect.Contains(e.Location))
         {
             BeginResizeRequested?.Invoke();
             return;
@@ -11335,12 +12174,24 @@ internal sealed class DesktopTodoWidgetView : Control
         base.OnMouseDown(e);
     }
 
+    protected override void OnMouseDoubleClick(MouseEventArgs e)
+    {
+        if (e.Button == MouseButtons.Left && _headerRect.Contains(e.Location))
+        {
+            ExpandCollapsedRequested?.Invoke();
+            return;
+        }
+
+        base.OnMouseDoubleClick(e);
+    }
+
     protected override void OnMouseMove(MouseEventArgs e)
     {
+        UserActivityDetected?.Invoke();
         UpdateToolTip(e.Location);
-        Cursor = _resizeRect.Contains(e.Location)
+        Cursor = !_collapsed && _resizeRect.Contains(e.Location)
             ? Cursors.SizeNWSE
-            : _settingsRect.Contains(e.Location) || _completedRect.Contains(e.Location) || _todayTitleRect.Contains(e.Location) || _overdueDateAreas.Any(item => item.Rect.Contains(e.Location)) || _checkAreas.Any(item => item.Rect.Contains(e.Location)) || _rowAreas.Any(item => item.Rect.Contains(e.Location))
+            : _settingsRect.Contains(e.Location) || (!_collapsed && (_completedRect.Contains(e.Location) || _todayTitleRect.Contains(e.Location) || _overdueDateAreas.Any(item => item.Rect.Contains(e.Location)) || _checkAreas.Any(item => item.Rect.Contains(e.Location)) || _rowAreas.Any(item => item.Rect.Contains(e.Location))))
                 ? Cursors.Hand
                 : Cursors.Default;
         base.OnMouseMove(e);
@@ -11363,7 +12214,7 @@ internal sealed class DesktopTodoWidgetView : Control
         _overdueDateAreas.Clear();
 
         var card = new Rectangle(0, 0, Width - 1, Height - 1);
-        if (card.Width < 220 || card.Height < 160)
+        if (card.Width < 220 || card.Height < 52)
         {
             return;
         }
@@ -11371,6 +12222,10 @@ internal sealed class DesktopTodoWidgetView : Control
         FillRound(g, card, _transparent ? DesktopWidgetStyle.CardFill : CardFill, 10);
         DrawRound(g, _transparent ? DesktopWidgetStyle.BorderColor : CardBorder, card, 10);
         DrawHeader(g, card);
+        if (_collapsed)
+        {
+            return;
+        }
         DrawTodos(g, card);
         DrawFooter(g, card);
         DrawResizeGrip(g, card);
@@ -13241,6 +14096,7 @@ internal sealed class DesktopOrganizerWidgetForm : Form
 {
     private const int WsExToolWindow = 0x00000080;
     private const int WsExAppWindow = 0x00040000;
+    private const int CollapsedHeight = 66;
     private const int ResizeBorder = 12;
     private const int WmNchittest = 0x0084;
     private const int HtClient = 1;
@@ -13253,12 +14109,15 @@ internal sealed class DesktopOrganizerWidgetForm : Form
     private const int HtBottomLeft = 16;
     private const int HtBottomRight = 17;
     private const int VisibleInset = 8;
+    private static readonly Size ExpandedMinimumSize = new(300, 240);
+    private static readonly Size CollapsedMinimumSize = new(300, CollapsedHeight);
 
     private readonly AppConfig _config;
     private readonly AppStore _store;
     private readonly Action<Rectangle> _placementChanged;
     private readonly FlowLayoutPanel _list = new();
     private readonly DesktopOrganizerWidgetView _view;
+    private readonly System.Windows.Forms.Timer _autoCollapseTimer = new() { Interval = 10000 };
     private WidgetPlacement? _placement;
     private WidgetResizeMessageFilter? _resizeFilter;
     private System.Windows.Forms.Timer? _manualDragTimer;
@@ -13271,6 +14130,8 @@ internal sealed class DesktopOrganizerWidgetForm : Form
     private bool _placedOnce;
     private bool _attachedToDesktop;
     private bool _restoringPlacement;
+    private bool _autoCollapseEnabled;
+    private bool _collapsed;
 
     public DesktopOrganizerWidgetForm(AppConfig config, AppStore store, Action<Rectangle> placementChanged, Func<IEnumerable<DeskCategory>>? categoryProvider = null, bool isSplit = false)
     {
@@ -13283,7 +14144,7 @@ internal sealed class DesktopOrganizerWidgetForm : Form
         FormBorderStyle = FormBorderStyle.None;
         StartPosition = FormStartPosition.Manual;
         Size = new Size(620, 520);
-        MinimumSize = new Size(300, 240);
+        MinimumSize = ExpandedMinimumSize;
         ShowInTaskbar = false;
         ShowIcon = false;
         TopMost = false;
@@ -13291,6 +14152,13 @@ internal sealed class DesktopOrganizerWidgetForm : Form
         Font = new Font("Microsoft YaHei UI", 9F);
         DoubleBuffered = true;
         _screenBounds = new Rectangle(Location, Size);
+        _autoCollapseTimer.Tick += (_, _) =>
+        {
+            if (_autoCollapseEnabled && !_collapsed)
+            {
+                SetCollapsed(true);
+            }
+        };
 
         BuildUi();
         ApplyWidgetSkin();
@@ -13322,6 +14190,8 @@ internal sealed class DesktopOrganizerWidgetForm : Form
     {
         _placement = placement;
         SetPositionLocked(placement?.Locked == true, save: false);
+        SetAutoCollapseEnabled(placement?.AutoCollapseEnabled == true || placement?.IsCollapsed == true, save: false, collapse: false);
+        SetCollapsed(_autoCollapseEnabled && placement?.IsCollapsed == true, save: false, resize: false);
         RefreshList();
         ApplyPlacementOrDefault(placement);
 
@@ -13335,6 +14205,7 @@ internal sealed class DesktopOrganizerWidgetForm : Form
         AttachToDesktopHost();
         ApplyTrackedScreenBounds();
         SavePlacement();
+        ResetAutoCollapseTimer();
     }
 
     protected override CreateParams CreateParams
@@ -13365,7 +14236,7 @@ internal sealed class DesktopOrganizerWidgetForm : Form
     {
         base.WndProc(ref m);
 
-        if (_positionLocked || m.Msg != WmNchittest || m.Result != (IntPtr)HtClient)
+        if (_positionLocked || _collapsed || m.Msg != WmNchittest || m.Result != (IntPtr)HtClient)
         {
             return;
         }
@@ -13402,6 +14273,7 @@ internal sealed class DesktopOrganizerWidgetForm : Form
         }
         _manualDragTimer?.Dispose();
         _manualDragTimer = null;
+        _autoCollapseTimer.Dispose();
         base.OnFormClosing(e);
     }
 
@@ -13412,7 +14284,9 @@ internal sealed class DesktopOrganizerWidgetForm : Form
         {
             if (placement is not null && placement.Width > 0 && placement.Height > 0)
             {
-                SetScreenBounds(NormalizeScreenBounds(new Rectangle(placement.X, placement.Y, Math.Max(MinimumSize.Width, placement.Width), Math.Max(MinimumSize.Height, placement.Height))));
+                var width = Math.Max(MinimumSize.Width, placement.Width);
+                var height = _collapsed ? CollapsedHeight : Math.Max(ExpandedMinimumSize.Height, placement.Height);
+                SetScreenBounds(NormalizeScreenBounds(new Rectangle(placement.X, placement.Y, width, height)));
                 _placedOnce = true;
                 return;
             }
@@ -13477,6 +14351,107 @@ internal sealed class DesktopOrganizerWidgetForm : Form
         _placementChanged(NormalizeScreenBounds(GetTrackedScreenBounds()));
     }
 
+    private void SetCollapsed(bool collapsed)
+    {
+        SetCollapsed(collapsed, save: true, resize: true);
+    }
+
+    private void SetCollapsed(bool collapsed, bool save, bool resize)
+    {
+        var current = GetTrackedScreenBounds();
+        if (collapsed && _placement is not null && !_collapsed && current.Height > CollapsedHeight)
+        {
+            _placement.ExpandedWidth = Math.Max(ExpandedMinimumSize.Width, current.Width);
+            _placement.ExpandedHeight = Math.Max(ExpandedMinimumSize.Height, current.Height);
+        }
+
+        _collapsed = collapsed;
+        MinimumSize = _collapsed ? CollapsedMinimumSize : ExpandedMinimumSize;
+        _view.SetCollapsed(_collapsed);
+        if (_placement is not null)
+        {
+            _placement.IsCollapsed = _collapsed;
+        }
+
+        if (resize && IsHandleCreated)
+        {
+            current = GetTrackedScreenBounds();
+            var width = _collapsed
+                ? Math.Max(CollapsedMinimumSize.Width, current.Width)
+                : Math.Max(ExpandedMinimumSize.Width, _placement?.ExpandedWidth > 0 ? _placement.ExpandedWidth : current.Width);
+            var height = _collapsed
+                ? CollapsedHeight
+                : Math.Max(ExpandedMinimumSize.Height, _placement?.ExpandedHeight > CollapsedHeight ? _placement.ExpandedHeight : 520);
+            SetScreenBounds(new Rectangle(current.X, current.Y, width, height));
+        }
+
+        if (save)
+        {
+            SavePlacement();
+        }
+
+        if (_collapsed)
+        {
+            _autoCollapseTimer.Stop();
+        }
+        else
+        {
+            ResetAutoCollapseTimer();
+        }
+    }
+
+    private void SetAutoCollapseEnabled(bool enabled, bool save, bool collapse)
+    {
+        _autoCollapseEnabled = enabled;
+        _view.SetAutoCollapseEnabled(_autoCollapseEnabled);
+        if (_placement is not null)
+        {
+            _placement.AutoCollapseEnabled = _autoCollapseEnabled;
+        }
+
+        if (_autoCollapseEnabled)
+        {
+            if (collapse)
+            {
+                SetCollapsed(true, save: false, resize: true);
+            }
+            else
+            {
+                ResetAutoCollapseTimer();
+            }
+        }
+        else
+        {
+            _autoCollapseTimer.Stop();
+            if (_collapsed)
+            {
+                SetCollapsed(false, save: false, resize: true);
+            }
+        }
+
+        if (save)
+        {
+            SavePlacement();
+        }
+    }
+
+    private void ExpandFromCollapsed()
+    {
+        SetCollapsed(!_collapsed);
+        ResetAutoCollapseTimer();
+    }
+
+    private void ResetAutoCollapseTimer()
+    {
+        if (!_autoCollapseEnabled || _collapsed || !Visible)
+        {
+            return;
+        }
+
+        _autoCollapseTimer.Stop();
+        _autoCollapseTimer.Start();
+    }
+
     private Rectangle GetTrackedScreenBounds()
     {
         if (_screenBounds.Width > 0 && _screenBounds.Height > 0)
@@ -13518,6 +14493,9 @@ internal sealed class DesktopOrganizerWidgetForm : Form
         _view.Dock = DockStyle.Fill;
         _view.BeginMoveRequested += BeginManualMove;
         _view.BeginResizeRequested += BeginManualResize;
+        _view.AutoCollapseChanged += value => SetAutoCollapseEnabled(value, save: true, collapse: true);
+        _view.ExpandCollapsedRequested += ExpandFromCollapsed;
+        _view.UserActivityDetected += ResetAutoCollapseTimer;
         _view.RefreshRequested += RefreshList;
         _view.AddCategoryRequested += AddCategoryFromWidget;
         _view.ManageRequested += () => ManageRequested?.Invoke();
@@ -13548,6 +14526,11 @@ internal sealed class DesktopOrganizerWidgetForm : Form
 
     private void BeginManualResize()
     {
+        if (_collapsed)
+        {
+            return;
+        }
+
         BeginManualDrag(resize: true);
     }
 
@@ -13879,7 +14862,7 @@ internal sealed class DesktopOrganizerWidgetForm : Form
 
         public bool PreFilterMessage(ref Message m)
         {
-            if (m.Msg != WmNchittest || _form.IsDisposed)
+            if (m.Msg != WmNchittest || _form.IsDisposed || _form._collapsed)
             {
                 return false;
             }
@@ -13991,6 +14974,7 @@ internal sealed class DesktopOrganizerWidgetView : Control
     private readonly ToolStripMenuItem _splitMenuItem = new("拆分为区域");
     private readonly ToolStripMenuItem _mergeMenuItem = new("合并组件");
     private readonly ToolStripMenuItem _lockPositionMenuItem = new("锁定位置");
+    private readonly ToolStripMenuItem _autoCollapseMenuItem = new("折叠");
     private readonly ToolTip _itemToolTip = new()
     {
         AutomaticDelay = 250,
@@ -14039,6 +15023,7 @@ internal sealed class DesktopOrganizerWidgetView : Control
     private Rectangle _resizeRect;
     private string? _hoverToolTipPath;
     private bool _suppressNextClick;
+    private bool _collapsed;
     private const int DragThreshold = 6;
     private const int PreviewTileWidth = 120;
     private const int BasePreviewTileHeight = 82;
@@ -14129,6 +15114,10 @@ internal sealed class DesktopOrganizerWidgetView : Control
         };
         SetMenuIcon(_lockPositionMenuItem, "zicaidan", "2-4.png");
         layoutMenu.DropDownItems.Add(_lockPositionMenuItem);
+        _autoCollapseMenuItem.CheckOnClick = true;
+        _autoCollapseMenuItem.Click += (_, _) => AutoCollapseChanged?.Invoke(_autoCollapseMenuItem.Checked);
+        SetMenuIcon(_autoCollapseMenuItem, "zicaidan", "2-5.png");
+        layoutMenu.DropDownItems.Add(_autoCollapseMenuItem);
         _settingsMenu.Items.Add(layoutMenu);
 
         var componentMenu = new ToolStripMenuItem("组件管理");
@@ -14171,7 +15160,9 @@ internal sealed class DesktopOrganizerWidgetView : Control
         SetMenuIcon(_transparentMenuItem, "zicaidan", "4-1.png");
         SetMenuIcon(_showNamesMenuItem, "zicaidan", "4-2.png");
         appearanceMenu.DropDownItems.Add(_transparentMenuItem);
-        appearanceMenu.DropDownItems.Add(DesktopWidgetStyle.CreateOpacityMenu());
+        var opacityMenu = DesktopWidgetStyle.CreateOpacityMenu();
+        SetMenuIcon(opacityMenu, "zicaidan", "4-4.png");
+        appearanceMenu.DropDownItems.Add(opacityMenu);
         appearanceMenu.DropDownItems.Add(_showNamesMenuItem);
         appearanceMenu.DropDownItems.Add(iconSizeMenu);
         _settingsMenu.Items.Add(appearanceMenu);
@@ -14245,6 +15236,9 @@ internal sealed class DesktopOrganizerWidgetView : Control
     public event Action? HideRequested;
     public event Action? CloseRequested;
     public event Action<bool>? LockPositionChanged;
+    public event Action<bool>? AutoCollapseChanged;
+    public event Action? ExpandCollapsedRequested;
+    public event Action? UserActivityDetected;
 
     public void SetPositionLocked(bool locked)
     {
@@ -14252,6 +15246,18 @@ internal sealed class DesktopOrganizerWidgetView : Control
         _lockPositionMenuItem.Checked = locked;
         _lockPositionMenuItem.Text = locked ? "已锁定" : "锁定位置";
         SetMenuIcon(_lockPositionMenuItem, "zicaidan", _positionLocked ? "2-3.png" : "2-4.png");
+    }
+
+    public void SetCollapsed(bool collapsed)
+    {
+        _collapsed = collapsed;
+        Invalidate();
+    }
+
+    public void SetAutoCollapseEnabled(bool enabled)
+    {
+        _autoCollapseMenuItem.Checked = enabled;
+        _autoCollapseMenuItem.Text = enabled ? "折叠：开启" : "折叠：关闭";
     }
 
     public void SetMergeTargets(IReadOnlyList<DesktopOrganizerMergeTarget> targets)
@@ -14519,6 +15525,26 @@ internal sealed class DesktopOrganizerWidgetView : Control
 
     protected override void OnMouseDown(MouseEventArgs e)
     {
+        UserActivityDetected?.Invoke();
+        if (_collapsed)
+        {
+            var collapsedHit = _hotspots.FirstOrDefault(item => item.Rect.Contains(e.Location));
+            if (collapsedHit.Key == "settings")
+            {
+                ShowSettingsMenu(new Point(collapsedHit.Rect.Left, collapsedHit.Rect.Bottom + 4));
+                return;
+            }
+
+            if (e.Button == MouseButtons.Left && _headerRect.Contains(e.Location))
+            {
+                BeginMoveRequested?.Invoke();
+                return;
+            }
+
+            base.OnMouseDown(e);
+            return;
+        }
+
         if (e.Button == MouseButtons.Right)
         {
             var rightItemHit = FindItemHit(e.Location);
@@ -14645,6 +15671,7 @@ internal sealed class DesktopOrganizerWidgetView : Control
 
     protected override void OnMouseMove(MouseEventArgs e)
     {
+        UserActivityDetected?.Invoke();
         if (_pendingCategoryDragIndex is not null)
         {
             var dx = Math.Abs(e.X - _pendingCategoryDragStart.X);
@@ -14708,7 +15735,7 @@ internal sealed class DesktopOrganizerWidgetView : Control
 
         UpdateItemToolTip(e.Location);
         var hoveringItem = FindItemHit(e.Location) is not null;
-        Cursor = _resizeRect.Contains(e.Location)
+        Cursor = !_collapsed && _resizeRect.Contains(e.Location)
             ? Cursors.SizeNWSE
             : hoveringItem || _hotspots.Any(item => item.Rect.Contains(e.Location)) ? Cursors.Hand : Cursors.Default;
         base.OnMouseMove(e);
@@ -14779,6 +15806,7 @@ internal sealed class DesktopOrganizerWidgetView : Control
 
     protected override void OnMouseWheel(MouseEventArgs e)
     {
+        UserActivityDetected?.Invoke();
         if (_categoryTabArea.Contains(e.Location))
         {
             SetCategoryTabOffset(_categoryTabArea.Width, _categoryTabScrollOffset + (e.Delta < 0 ? 72 : -72));
@@ -15009,6 +16037,12 @@ internal sealed class DesktopOrganizerWidgetView : Control
 
     protected override void OnMouseDoubleClick(MouseEventArgs e)
     {
+        if (e.Button == MouseButtons.Left && _headerRect.Contains(e.Location))
+        {
+            ExpandCollapsedRequested?.Invoke();
+            return;
+        }
+
         if (e.Button == MouseButtons.Left)
         {
             var itemHit = FindItemHit(e.Location);
@@ -15035,7 +16069,7 @@ internal sealed class DesktopOrganizerWidgetView : Control
         _itemAreas.Clear();
 
         var card = new Rectangle(0, 0, ClientSize.Width - 1, ClientSize.Height - 1);
-        if (card.Width < 260 || card.Height < 220)
+        if (card.Width < 260 || card.Height < 58)
         {
             return;
         }
@@ -15043,6 +16077,10 @@ internal sealed class DesktopOrganizerWidgetView : Control
         FillRound(g, card, CurrentCardFill, 10);
         DrawRound(g, card, CurrentCardBorder, 10);
         DrawHeader(g, card);
+        if (_collapsed)
+        {
+            return;
+        }
         DrawCategoryList(g, card);
         DrawResizeGrip(g, card);
     }
@@ -16329,18 +17367,30 @@ internal sealed class DesktopClipboardWidgetForm : Form
     private const int WsExToolWindow = 0x00000080;
     private const int WsExAppWindow = 0x00040000;
     private const int WmContextMenu = 0x007B;
+    private const int CollapsedHeight = 58;
+    private static readonly Size ExpandedMinimumSize = new(320, 240);
+    private static readonly Size CollapsedMinimumSize = new(320, CollapsedHeight);
 
     private readonly DesktopClipboardWidgetView _view;
     private readonly Action _clipboardChanged;
     private readonly Action<Rectangle> _placementChanged;
     private readonly Action<bool> _transparentChanged;
     private readonly Action<bool> _topMostChanged;
+    private readonly System.Windows.Forms.Timer _autoCollapseTimer = new() { Interval = 10000 };
     private WidgetPlacement? _placement;
     private bool _transparent;
     private bool _positionLocked;
     private bool _topMost;
     private bool _attachedToDesktop;
     private bool _restoringPlacement;
+    private bool _autoCollapseEnabled;
+    private bool _collapsed;
+    private Rectangle _screenBounds;
+    private System.Windows.Forms.Timer? _manualDragTimer;
+    private Rectangle _manualDragStartBounds;
+    private Point _manualDragStartCursor;
+    private bool _manualResize;
+    private bool _manualDragging;
 
     public DesktopClipboardWidgetForm(ClipboardData clipboard, Action clipboardChanged, Action<ClipboardHistoryItem> copyRequested, Action<Rectangle> placementChanged, bool transparent, Action<bool> transparentChanged, Action<bool> topMostChanged, Action manageRequested)
     {
@@ -16360,23 +17410,26 @@ internal sealed class DesktopClipboardWidgetForm : Form
         ShowIcon = false;
         StartPosition = FormStartPosition.Manual;
         Size = new Size(420, 360);
-        MinimumSize = new Size(320, 240);
+        MinimumSize = ExpandedMinimumSize;
         BackColor = Color.FromArgb(20, 28, 40);
         _view.BeginMoveRequested += () =>
         {
             if (!_positionLocked)
             {
-                NativeGlass.BeginMove(Handle);
+                BeginManualDrag(resize: false);
             }
         };
         _view.BeginResizeRequested += () =>
         {
-            if (!_positionLocked)
+            if (!_positionLocked && !_collapsed)
             {
-                NativeGlass.BeginResize(Handle, 17);
+                BeginManualDrag(resize: true);
             }
         };
         _view.LockPositionChanged += SetPositionLocked;
+        _view.AutoCollapseChanged += value => SetAutoCollapseEnabled(value, save: true, collapse: true);
+        _view.ExpandCollapsedRequested += ExpandFromCollapsed;
+        _view.UserActivityDetected += ResetAutoCollapseTimer;
         _view.TopMostChanged += SetTopMostMode;
         _view.ClipboardChanged += _clipboardChanged;
         _view.ClearRequested += ClearClipboardHistory;
@@ -16384,8 +17437,20 @@ internal sealed class DesktopClipboardWidgetForm : Form
         _view.CloseRequested += Close;
         _view.ManageRequested += () => manageRequested();
         Controls.Add(_view);
+        _autoCollapseTimer.Tick += (_, _) =>
+        {
+            if (_autoCollapseEnabled && !_collapsed)
+            {
+                SetCollapsed(true);
+            }
+        };
         DesktopWidgetStyle.OpacityChanged += ApplyWidgetSkin;
-        FormClosed += (_, _) => DesktopWidgetStyle.OpacityChanged -= ApplyWidgetSkin;
+        FormClosed += (_, _) =>
+        {
+            _manualDragTimer?.Dispose();
+            _autoCollapseTimer.Dispose();
+            DesktopWidgetStyle.OpacityChanged -= ApplyWidgetSkin;
+        };
     }
 
     public void ShowAsDesktopWidget(WidgetPlacement? placement = null)
@@ -16393,6 +17458,8 @@ internal sealed class DesktopClipboardWidgetForm : Form
         _placement = placement;
         SetPositionLocked(placement?.Locked == true, save: false);
         SetTopMostMode(placement?.TopMost == true, save: false);
+        SetAutoCollapseEnabled(placement?.AutoCollapseEnabled == true || placement?.IsCollapsed == true, save: false, collapse: false);
+        SetCollapsed(_autoCollapseEnabled && placement?.IsCollapsed == true, save: false, resize: false);
         ApplyPlacementOrDefault(placement);
         Show();
         BringToFront();
@@ -16407,6 +17474,7 @@ internal sealed class DesktopClipboardWidgetForm : Form
 
         EnsureVisibleOnScreen();
         SavePlacement();
+        ResetAutoCollapseTimer();
     }
 
     public void RefreshClipboard()
@@ -16599,7 +17667,9 @@ internal sealed class DesktopClipboardWidgetForm : Form
         {
             if (placement is not null && placement.Width > 0 && placement.Height > 0)
             {
-                SetScreenBounds(NormalizeScreenBounds(new Rectangle(placement.X, placement.Y, Math.Max(MinimumSize.Width, placement.Width), Math.Max(MinimumSize.Height, placement.Height))));
+                var width = Math.Max(MinimumSize.Width, placement.Width);
+                var height = _collapsed ? CollapsedHeight : Math.Max(ExpandedMinimumSize.Height, placement.Height);
+                SetScreenBounds(NormalizeScreenBounds(new Rectangle(placement.X, placement.Y, width, height)));
                 return;
             }
 
@@ -16622,13 +17692,191 @@ internal sealed class DesktopClipboardWidgetForm : Form
         _placementChanged(GetScreenBounds());
     }
 
+    private void SetCollapsed(bool collapsed)
+    {
+        SetCollapsed(collapsed, save: true, resize: true);
+    }
+
+    private void SetCollapsed(bool collapsed, bool save, bool resize)
+    {
+        var current = GetScreenBounds();
+        if (collapsed && _placement is not null && !_collapsed && current.Height > CollapsedHeight)
+        {
+            _placement.ExpandedWidth = Math.Max(ExpandedMinimumSize.Width, current.Width);
+            _placement.ExpandedHeight = Math.Max(ExpandedMinimumSize.Height, current.Height);
+        }
+
+        _collapsed = collapsed;
+        MinimumSize = _collapsed ? CollapsedMinimumSize : ExpandedMinimumSize;
+        _view.SetCollapsed(_collapsed);
+        if (_placement is not null)
+        {
+            _placement.IsCollapsed = _collapsed;
+        }
+
+        if (resize && IsHandleCreated)
+        {
+            current = GetScreenBounds();
+            var width = _collapsed
+                ? Math.Max(CollapsedMinimumSize.Width, current.Width)
+                : Math.Max(ExpandedMinimumSize.Width, _placement?.ExpandedWidth > 0 ? _placement.ExpandedWidth : current.Width);
+            var height = _collapsed
+                ? CollapsedHeight
+                : Math.Max(ExpandedMinimumSize.Height, _placement?.ExpandedHeight > CollapsedHeight ? _placement.ExpandedHeight : 360);
+            SetScreenBounds(new Rectangle(current.X, current.Y, width, height));
+        }
+
+        if (save)
+        {
+            SavePlacement();
+        }
+
+        if (_collapsed)
+        {
+            _autoCollapseTimer.Stop();
+        }
+        else
+        {
+            ResetAutoCollapseTimer();
+        }
+    }
+
+    private void SetAutoCollapseEnabled(bool enabled, bool save, bool collapse)
+    {
+        _autoCollapseEnabled = enabled;
+        _view.SetAutoCollapseEnabled(_autoCollapseEnabled);
+        if (_placement is not null)
+        {
+            _placement.AutoCollapseEnabled = _autoCollapseEnabled;
+        }
+
+        if (_autoCollapseEnabled)
+        {
+            if (collapse)
+            {
+                SetCollapsed(true, save: false, resize: true);
+            }
+            else
+            {
+                ResetAutoCollapseTimer();
+            }
+        }
+        else
+        {
+            _autoCollapseTimer.Stop();
+            if (_collapsed)
+            {
+                SetCollapsed(false, save: false, resize: true);
+            }
+        }
+
+        if (save)
+        {
+            SavePlacement();
+        }
+    }
+
+    private void ExpandFromCollapsed()
+    {
+        SetCollapsed(!_collapsed);
+        ResetAutoCollapseTimer();
+    }
+
+    private void ResetAutoCollapseTimer()
+    {
+        if (!_autoCollapseEnabled || _collapsed || !Visible)
+        {
+            return;
+        }
+
+        _autoCollapseTimer.Stop();
+        _autoCollapseTimer.Start();
+    }
+
+    private void BeginManualDrag(bool resize)
+    {
+        if (_positionLocked || (resize && _collapsed))
+        {
+            return;
+        }
+
+        _manualDragStartCursor = Cursor.Position;
+        _manualDragStartBounds = GetScreenBounds();
+        _manualResize = resize;
+        _manualDragging = true;
+        _manualDragTimer ??= new System.Windows.Forms.Timer { Interval = 15 };
+        _manualDragTimer.Tick -= ManualDragTick;
+        _manualDragTimer.Tick += ManualDragTick;
+        _manualDragTimer.Start();
+    }
+
+    private void ManualDragTick(object? sender, EventArgs e)
+    {
+        if ((Control.MouseButtons & MouseButtons.Left) == 0)
+        {
+            StopManualDrag(save: true);
+            return;
+        }
+
+        var cursor = Cursor.Position;
+        var dx = cursor.X - _manualDragStartCursor.X;
+        var dy = cursor.Y - _manualDragStartCursor.Y;
+        var bounds = _manualResize
+            ? new Rectangle(
+                _manualDragStartBounds.X,
+                _manualDragStartBounds.Y,
+                Math.Max(MinimumSize.Width, _manualDragStartBounds.Width + dx),
+                Math.Max(MinimumSize.Height, _manualDragStartBounds.Height + dy))
+            : new Rectangle(
+                _manualDragStartBounds.X + dx,
+                _manualDragStartBounds.Y + dy,
+                _manualDragStartBounds.Width,
+                _manualDragStartBounds.Height);
+        SetScreenBounds(NormalizeScreenBounds(bounds));
+    }
+
+    private void StopManualDrag(bool save)
+    {
+        if (!_manualDragging)
+        {
+            return;
+        }
+
+        _manualDragTimer?.Stop();
+        _manualDragging = false;
+        if (save)
+        {
+            SavePlacement();
+        }
+    }
+
     private Rectangle GetScreenBounds()
     {
+        if (_screenBounds.Width > 0 && _screenBounds.Height > 0)
+        {
+            return _screenBounds;
+        }
+
         return IsHandleCreated ? NativeGlass.GetWindowScreenBounds(Handle, Bounds) : Bounds;
+    }
+
+    private void TrackActualScreenBounds()
+    {
+        if (_restoringPlacement || !IsHandleCreated)
+        {
+            return;
+        }
+
+        var bounds = NativeGlass.GetWindowScreenBounds(Handle, Bounds);
+        if (bounds.Width > 0 && bounds.Height > 0)
+        {
+            _screenBounds = bounds;
+        }
     }
 
     private void SetScreenBounds(Rectangle bounds)
     {
+        _screenBounds = bounds;
         if (_attachedToDesktop && IsHandleCreated)
         {
             NativeGlass.SetDesktopChildScreenBounds(Handle, bounds);
@@ -16700,6 +17948,7 @@ internal sealed class DesktopClipboardWidgetView : Control
     private readonly ToolStripMenuItem _lockItemMenuItem = new("锁定");
     private readonly ToolStripMenuItem _pinItemMenuItem = new("置顶");
     private readonly ToolStripMenuItem _deleteItemMenuItem = new("删除");
+    private readonly ToolStripMenuItem _autoCollapseMenuItem = new("折叠");
     private readonly ClipboardPreviewPopup _previewPopup = new();
     private readonly List<Image> _menuItemImages = new();
     private readonly System.Windows.Forms.Timer _menuDismissTimer = new() { Interval = 40 };
@@ -16716,6 +17965,7 @@ internal sealed class DesktopClipboardWidgetView : Control
     private bool _transparent;
     private bool _positionLocked;
     private bool _topMost;
+    private bool _collapsed;
 
     private static readonly Color CardFill = Color.FromArgb(222, 24, 34, 48);
     private static readonly Color CardBorder = Color.FromArgb(98, 126, 154, 184);
@@ -16760,6 +18010,10 @@ internal sealed class DesktopClipboardWidgetView : Control
         };
         SetMenuIcon(_lockPositionMenuItem, "zicaidan", "2-4.png");
         layoutMenu.DropDownItems.Add(_lockPositionMenuItem);
+        _autoCollapseMenuItem.CheckOnClick = true;
+        _autoCollapseMenuItem.Click += (_, _) => AutoCollapseChanged?.Invoke(_autoCollapseMenuItem.Checked);
+        SetMenuIcon(_autoCollapseMenuItem, "zicaidan", "2-5.png");
+        layoutMenu.DropDownItems.Add(_autoCollapseMenuItem);
         _topMostMenuItem.CheckOnClick = true;
         _topMostMenuItem.Click += (_, _) =>
         {
@@ -16787,7 +18041,9 @@ internal sealed class DesktopClipboardWidgetView : Control
         };
         SetMenuIcon(_transparentMenuItem, "zicaidan", "4-1.png");
         appearanceMenu.DropDownItems.Add(_transparentMenuItem);
-        appearanceMenu.DropDownItems.Add(DesktopWidgetStyle.CreateOpacityMenu());
+        var opacityMenu = DesktopWidgetStyle.CreateOpacityMenu();
+        SetMenuIcon(opacityMenu, "zicaidan", "4-4.png");
+        appearanceMenu.DropDownItems.Add(opacityMenu);
         _menu.Items.Add(appearanceMenu);
         _menu.Items.Add(new ToolStripSeparator());
         var settingsMenuItem = _menu.Items.Add("剪贴板管理", null, (_, _) => ManageRequested?.Invoke());
@@ -16861,6 +18117,9 @@ internal sealed class DesktopClipboardWidgetView : Control
     public event Action? ClipboardChanged;
     public event Action<bool>? LockPositionChanged;
     public event Action<bool>? TopMostChanged;
+    public event Action<bool>? AutoCollapseChanged;
+    public event Action? ExpandCollapsedRequested;
+    public event Action? UserActivityDetected;
 
     public bool IsClipboardEmpty => _clipboard.Items.Count == 0;
 
@@ -16912,6 +18171,19 @@ internal sealed class DesktopClipboardWidgetView : Control
         Invalidate();
     }
 
+    public void SetCollapsed(bool collapsed)
+    {
+        _collapsed = collapsed;
+        _previewPopup.Hide();
+        Invalidate();
+    }
+
+    public void SetAutoCollapseEnabled(bool enabled)
+    {
+        _autoCollapseMenuItem.Checked = enabled;
+        _autoCollapseMenuItem.Text = enabled ? "折叠：开启" : "折叠：关闭";
+    }
+
     protected override void Dispose(bool disposing)
     {
         if (disposing)
@@ -16936,6 +18208,33 @@ internal sealed class DesktopClipboardWidgetView : Control
 
     protected override void OnMouseDown(MouseEventArgs e)
     {
+        UserActivityDetected?.Invoke();
+        if (_collapsed)
+        {
+            Focus();
+            if (_settingsRect.Contains(e.Location))
+            {
+                _menu.Show(this, _settingsRect.Left, _settingsRect.Bottom + 4);
+                return;
+            }
+
+            if (_topMostRect.Contains(e.Location))
+            {
+                SetTopMost(!_topMost);
+                TopMostChanged?.Invoke(_topMost);
+                return;
+            }
+
+            if (e.Button == MouseButtons.Left && e.Y <= 52)
+            {
+                BeginMoveRequested?.Invoke();
+                return;
+            }
+
+            base.OnMouseDown(e);
+            return;
+        }
+
         Focus();
         if (_settingsRect.Contains(e.Location))
         {
@@ -16950,7 +18249,7 @@ internal sealed class DesktopClipboardWidgetView : Control
             return;
         }
 
-        if (_resizeRect.Contains(e.Location))
+        if (!_collapsed && _resizeRect.Contains(e.Location))
         {
             BeginResizeRequested?.Invoke();
             return;
@@ -16981,6 +18280,12 @@ internal sealed class DesktopClipboardWidgetView : Control
 
     protected override void OnMouseDoubleClick(MouseEventArgs e)
     {
+        if (e.Button == MouseButtons.Left && e.Y <= 52 && !_settingsRect.Contains(e.Location) && !_topMostRect.Contains(e.Location))
+        {
+            ExpandCollapsedRequested?.Invoke();
+            return;
+        }
+
         var itemHit = _itemAreas.FirstOrDefault(item => item.Rect.Contains(e.Location));
         if (itemHit.Item is not null)
         {
@@ -16995,6 +18300,7 @@ internal sealed class DesktopClipboardWidgetView : Control
 
     protected override void OnMouseMove(MouseEventArgs e)
     {
+        UserActivityDetected?.Invoke();
         if (!Focused)
         {
             Focus();
@@ -17015,8 +18321,8 @@ internal sealed class DesktopClipboardWidgetView : Control
             _previewPopup.Hide();
         }
 
-        Cursor = _resizeRect.Contains(e.Location) ? Cursors.SizeNWSE
-            : _settingsRect.Contains(e.Location) || _topMostRect.Contains(e.Location) || _itemAreas.Any(item => item.Rect.Contains(e.Location)) ? Cursors.Hand
+        Cursor = !_collapsed && _resizeRect.Contains(e.Location) ? Cursors.SizeNWSE
+            : _settingsRect.Contains(e.Location) || _topMostRect.Contains(e.Location) || (!_collapsed && _itemAreas.Any(item => item.Rect.Contains(e.Location))) ? Cursors.Hand
             : Cursors.Default;
         base.OnMouseMove(e);
     }
@@ -17030,6 +18336,13 @@ internal sealed class DesktopClipboardWidgetView : Control
 
     protected override void OnMouseWheel(MouseEventArgs e)
     {
+        UserActivityDetected?.Invoke();
+        if (_collapsed)
+        {
+            base.OnMouseWheel(e);
+            return;
+        }
+
         var visibleCount = VisibleItemCount(new Rectangle(14, 58, Math.Max(1, Width - 28), Math.Max(1, Height - 72)));
         var maxOffset = Math.Max(0, _clipboard.Items.Count - visibleCount);
         if (maxOffset == 0)
@@ -17050,7 +18363,7 @@ internal sealed class DesktopClipboardWidgetView : Control
         g.TextRenderingHint = System.Drawing.Text.TextRenderingHint.ClearTypeGridFit;
         _itemAreas.Clear();
         var card = new Rectangle(0, 0, Width - 1, Height - 1);
-        if (card.Width < 220 || card.Height < 150)
+        if (card.Width < 220 || card.Height < 52)
         {
             return;
         }
@@ -17064,6 +18377,11 @@ internal sealed class DesktopClipboardWidgetView : Control
         }
 
         DrawHeader(g, card);
+        if (_collapsed)
+        {
+            return;
+        }
+
         DrawItems(g, new Rectangle(card.X + 14, card.Y + 58, card.Width - 28, card.Height - 72));
         DrawResizeGrip(g, card);
     }
@@ -17076,9 +18394,9 @@ internal sealed class DesktopClipboardWidgetView : Control
         }
 
         TextRenderer.DrawText(g, "剪贴板", TitleFont, new Rectangle(card.X + 44, card.Y + 12, card.Width - 104, 32), TextMain, TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis);
-        _topMostRect = new Rectangle(card.Right - 76, card.Y + 14, 28, 28);
-        DrawTopMostButton(g, _topMostRect);
         _settingsRect = new Rectangle(card.Right - 42, card.Y + 14, 28, 28);
+        _topMostRect = new Rectangle(_settingsRect.Left - 34, card.Y + 14, 28, 28);
+        DrawTopMostButton(g, _topMostRect);
         if (_settingsIcon is not null)
         {
             g.DrawImage(_settingsIcon, _settingsRect);
@@ -18844,6 +20162,7 @@ internal sealed class SettingsPageCanvas : Control
     public event Action? ChooseDataPathRequested;
     public event Action? RestoreDesktopRequested;
     public event Action? ExportProjectsRequested;
+    public event Action? CheckVersionRequested;
     public event Action? IntroRequested;
     public event Action? AboutRequested;
     public event Action? ResetRequested;
@@ -18890,6 +20209,8 @@ internal sealed class SettingsPageCanvas : Control
         y += 126;
         DrawDataPathLine(g, x, y, rect.Width - 56);
         y += 62;
+        DrawActionLine(g, x, y, "检测版本", "checkVersion", "检测", $"当前版本 v{UpdateChecker.CurrentVersionText}，点击后检测是否有新版本", false);
+        y += 52;
         DrawActionLine(g, x, y, "恢复桌面布局", "restore", "恢复到桌面", "将桌面收纳中的所有项目移回系统桌面", false);
         y += 52;
         DrawActionLine(g, x, y, "导出项目管理", "export", "导出 Excel", "导出 xlsx 表格，项目、事项、子任务路径会写入超链接", false);
@@ -19038,6 +20359,7 @@ internal sealed class SettingsPageCanvas : Control
             case "mainSave": MainHotKeySaveRequested?.Invoke(_mainHotKeyBox.Text); break;
             case "desktopSave": DesktopHotKeySaveRequested?.Invoke(_desktopHotKeyBox.Text); break;
             case "choosePath": ChooseDataPathRequested?.Invoke(); break;
+            case "checkVersion": CheckVersionRequested?.Invoke(); break;
             case "restore": RestoreDesktopRequested?.Invoke(); break;
             case "export": ExportProjectsRequested?.Invoke(); break;
             case "intro": IntroRequested?.Invoke(); break;
@@ -22365,6 +23687,7 @@ internal sealed class DashboardCanvas : Control
     private int _dragProjectTabsStartX;
     private int _dragProjectTabsStartOffset;
     private int _projectTabScrollOffset;
+    private Rectangle _greetingRect;
     private const int DesktopPreviewTileWidth = 54;
     private const int ProjectTabWidth = 126;
     private const int ProjectTabGap = 8;
@@ -22396,6 +23719,7 @@ internal sealed class DashboardCanvas : Control
     public event Action? AddLauncher;
     public event Action? OrganizeDesktop;
     public event Action? SearchRequested;
+    public event Action? RenameDisplayNameRequested;
 
     protected override void OnMouseMove(MouseEventArgs e)
     {
@@ -22419,10 +23743,21 @@ internal sealed class DashboardCanvas : Control
         }
 
         UpdateTodoToolTip(e.Location);
-        Cursor = _projectTabStripArea.Contains(e.Location) || _hotspots.Any(h => h.Rect.Contains(e.Location)) || _noteHotspots.Any(h => h.Rect.Contains(e.Location)) || _todoCompletedArea.Contains(e.Location) || _todoAreas.Any(item => item.Rect.Contains(e.Location)) || _todoCheckAreas.Any(item => item.Rect.Contains(e.Location))
+        Cursor = _greetingRect.Contains(e.Location) || _projectTabStripArea.Contains(e.Location) || _hotspots.Any(h => h.Rect.Contains(e.Location)) || _noteHotspots.Any(h => h.Rect.Contains(e.Location)) || _todoCompletedArea.Contains(e.Location) || _todoAreas.Any(item => item.Rect.Contains(e.Location)) || _todoCheckAreas.Any(item => item.Rect.Contains(e.Location))
             ? Cursors.Hand
             : Cursors.Default;
         base.OnMouseMove(e);
+    }
+
+    protected override void OnMouseDoubleClick(MouseEventArgs e)
+    {
+        if (e.Button == MouseButtons.Left && _greetingRect.Contains(e.Location))
+        {
+            RenameDisplayNameRequested?.Invoke();
+            return;
+        }
+
+        base.OnMouseDoubleClick(e);
     }
 
     protected override void OnMouseDown(MouseEventArgs e)
@@ -22650,11 +23985,19 @@ internal sealed class DashboardCanvas : Control
 
     private void DrawHeader(Graphics g, Rectangle rect)
     {
+        var search = new Rectangle(rect.Right - 405, rect.Y + 50, 385, 42);
         DrawText(g, $"{DateTime.Now:yyyy年M月d日}    {WeekText(DateTime.Now.DayOfWeek)}", NormalFont, TextSubtle, rect.X + 4, rect.Y + 16);
-        DrawText(g, $"{Greeting()}，开发者！", HeaderFont, TextMain, rect.X + 4, rect.Y + 48);
+        var greetingText = $"{Greeting()}，{DisplayName()}！";
+        _greetingRect = new Rectangle(rect.X + 4, rect.Y + 42, Math.Max(1, search.Left - rect.X - 28), 56);
+        TextRenderer.DrawText(
+            g,
+            greetingText,
+            HeaderFont,
+            _greetingRect,
+            TextMain,
+            TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis | TextFormatFlags.NoPadding | TextFormatFlags.PreserveGraphicsClipping);
         DrawText(g, "专注当下，持续记录，成就更好的自己！", NormalFont, TextSubtle, rect.X + 4, rect.Y + 110);
 
-        var search = new Rectangle(rect.Right - 405, rect.Y + 50, 385, 42);
         FillRound(g, search, Color.FromArgb(190, 47, 58, 76), 9);
         DrawRound(g, search, Color.FromArgb(82, 96, 116, 140), 9);
         var key = new Rectangle(search.Right - 74, search.Y + 8, 62, 26);
@@ -23255,6 +24598,13 @@ internal sealed class DashboardCanvas : Control
     {
         var hour = DateTime.Now.Hour;
         return hour < 12 ? "上午好" : hour < 18 ? "下午好" : "晚上好";
+    }
+
+    private string DisplayName()
+    {
+        return string.IsNullOrWhiteSpace(_config.MainWindowDisplayName)
+            ? Environment.MachineName
+            : _config.MainWindowDisplayName.Trim();
     }
 
     private static string WeekText(DayOfWeek day)

@@ -232,15 +232,14 @@ internal static class NativeGlass
         }
 
         var parent = GetParent(handle);
-        if (parent == IntPtr.Zero)
+        if (parent != IntPtr.Zero)
         {
-            return fallback;
+            var location = new NativePoint { X = fallback.X, Y = fallback.Y };
+            return ClientToScreen(parent, ref location)
+                ? new Rectangle(location.X, location.Y, Math.Max(1, fallback.Width), Math.Max(1, fallback.Height))
+                : fallback;
         }
-
-        var location = new NativePoint { X = fallback.X, Y = fallback.Y };
-        return ClientToScreen(parent, ref location)
-            ? new Rectangle(location.X, location.Y, Math.Max(1, fallback.Width), Math.Max(1, fallback.Height))
-            : fallback;
+        return fallback;
     }
 
     public static void NotifyShellMoved(string source, string target, bool directory)

@@ -4,6 +4,7 @@ namespace DustDesk;
 
 public sealed class AppConfig
 {
+    public string MainWindowDisplayName { get; set; } = "";
     public bool DesktopWidgetTransparent { get; set; } = true;
     public int DesktopWidgetOpacity { get; set; } = 35;
     public bool DesktopOrganizerShowNames { get; set; }
@@ -69,6 +70,10 @@ public class WidgetPlacement
     public int Y { get; set; }
     public int Width { get; set; }
     public int Height { get; set; }
+    public bool AutoCollapseEnabled { get; set; }
+    public bool IsCollapsed { get; set; }
+    public int ExpandedWidth { get; set; }
+    public int ExpandedHeight { get; set; }
 }
 
 public sealed class DesktopNoteWidgetPlacement : WidgetPlacement
