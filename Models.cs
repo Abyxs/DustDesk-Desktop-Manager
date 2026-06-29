@@ -50,6 +50,7 @@ public sealed class AppConfig
     public WidgetPlacement? DesktopSystemMonitorWidget { get; set; }
     public WidgetPlacement? DesktopSearchWidget { get; set; }
     public WidgetPlacement? DesktopClipboardWidget { get; set; }
+    public List<DesktopOrganizerSplitWidgetPlacement> DesktopOrganizerSplitWidgets { get; set; } = new();
     public List<DesktopNoteWidgetPlacement> DesktopNoteWidgets { get; set; } = new();
 
     public List<DeskCategory> DesktopCategories { get; set; } = new()
@@ -79,6 +80,11 @@ public class WidgetPlacement
 public sealed class DesktopNoteWidgetPlacement : WidgetPlacement
 {
     public string NoteId { get; set; } = "";
+}
+
+public sealed class DesktopOrganizerSplitWidgetPlacement : WidgetPlacement
+{
+    public List<string> CategoryNames { get; set; } = new();
 }
 
 public sealed class DeskCategory

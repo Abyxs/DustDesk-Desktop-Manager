@@ -8,7 +8,7 @@
     <ApplicationHighDpiMode>PerMonitorV2</ApplicationHighDpiMode>
     <AssemblyName>DustDesk</AssemblyName>
     <RootNamespace>DustDesk</RootNamespace>
-    <Version>1.5.0</Version>
+    <Version>1.5.1</Version>
     <DefaultItemExcludes>$(DefaultItemExcludes);bin\**;obj\**;obj-resizable\**</DefaultItemExcludes>
   </PropertyGroup>
   <ItemGroup>
@@ -17,6 +17,10 @@
       <CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory>
     </Content>
     <Content Include="使用说明.txt">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      <CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory>
+    </Content>
+    <Content Include="版本信息.md">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
       <CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory>
     </Content>

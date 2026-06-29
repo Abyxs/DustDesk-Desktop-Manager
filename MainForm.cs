@@ -86,6 +86,8 @@ public sealed class MainForm : Form
     private DesktopClipboardWidgetForm? _desktopClipboardWidget;
     private readonly List<DesktopOrganizerWidgetForm> _desktopOrganizerSplitWidgets = new();
     private readonly Dictionary<DesktopOrganizerWidgetForm, List<DeskCategory>> _desktopOrganizerSplitWidgetCategories = new();
+    private readonly Dictionary<DesktopOrganizerWidgetForm, DesktopOrganizerSplitWidgetPlacement> _desktopOrganizerSplitWidgetPlacements = new();
+    private readonly HashSet<DesktopOrganizerWidgetForm> _preserveOrganizerSplitConfigOnClose = new();
     private readonly HashSet<DeskCategory> _splitDesktopCategories = new();
     private readonly HashSet<string> _desktopHotKeyHiddenWidgetKeys = new(StringComparer.Ordinal);
     private readonly List<DesktopProjectWidgetForm> _desktopProjectSplitWidgets = new();
@@ -590,7 +592,7 @@ public sealed class MainForm : Form
             "tongjifenxi.png",
             "sousuo.png",
             "jiance.png",
-            "jiantieban.png",
+            "jiantianban.png",
             "shezhizhognxin.png"
         };
 
@@ -1242,16 +1244,23 @@ public sealed class MainForm : Form
         if (_config.DesktopOrganizerWidget is not null)
         {
             _config.DesktopOrganizerWidget.Visible = false;
-            _store.SaveConfig(_config);
         }
 
         foreach (var widget in _desktopOrganizerSplitWidgets.ToArray())
         {
             if (!widget.IsDisposed)
             {
+                if (_desktopOrganizerSplitWidgetPlacements.TryGetValue(widget, out var placement))
+                {
+                    placement.Visible = false;
+                }
+
+                _preserveOrganizerSplitConfigOnClose.Add(widget);
                 widget.Close();
             }
         }
+
+        _store.SaveConfig(_config);
 
         if (_desktopOrganizerWidget is not null && !_desktopOrganizerWidget.IsDisposed)
         {
@@ -1800,6 +1809,7 @@ public sealed class MainForm : Form
         _config.DesktopOrganizerWidget.Visible = true;
         _store.SaveConfig(_config);
         _desktopOrganizerWidget.ShowAsDesktopWidget(_config.DesktopOrganizerWidget);
+        RestoreDesktopOrganizerSplitWidgets();
         if (minimizeMain)
         {
             BeginInvoke(new Action(() =>
@@ -1847,7 +1857,7 @@ public sealed class MainForm : Form
         _desktopOrganizerWidget?.RefreshWidget();
     }
 
-    private void SplitDesktopOrganizerWidget(IReadOnlyList<DeskCategory> categories, int cascadeIndex = 0)
+    private void SplitDesktopOrganizerWidget(IReadOnlyList<DeskCategory> categories, int cascadeIndex = 0, DesktopOrganizerSplitWidgetPlacement? savedPlacement = null)
     {
         if (categories.Count == 0)
         {
@@ -1855,6 +1865,18 @@ public sealed class MainForm : Form
         }
 
         var splitCategories = categories.ToList();
+        var placement = savedPlacement ?? CreateOrganizerSplitPlacement(cascadeIndex);
+        placement.CategoryNames = splitCategories
+            .Select(category => category.Name)
+            .Where(name => !string.IsNullOrWhiteSpace(name))
+            .Distinct(StringComparer.Ordinal)
+            .ToList();
+        placement.Visible = true;
+        if (!_config.DesktopOrganizerSplitWidgets.Contains(placement))
+        {
+            _config.DesktopOrganizerSplitWidgets.Add(placement);
+        }
+
         foreach (var category in splitCategories)
         {
             _splitDesktopCategories.Add(category);
@@ -1863,7 +1885,7 @@ public sealed class MainForm : Form
         var splitWidget = new DesktopOrganizerWidgetForm(
             _config,
             _store,
-            _ => { },
+            bounds => SaveDesktopOrganizerSplitPlacement(placement, bounds),
             () => splitCategories.Where(item => _config.DesktopCategories.Contains(item)),
             isSplit: true);
         splitWidget.ManageRequested += () =>
@@ -1879,8 +1901,15 @@ public sealed class MainForm : Form
         {
             _desktopOrganizerSplitWidgets.Remove(splitWidget);
             _desktopOrganizerSplitWidgetCategories.Remove(splitWidget);
+            _desktopOrganizerSplitWidgetPlacements.Remove(splitWidget);
             if (!_closingApp)
             {
+                if (!_preserveOrganizerSplitConfigOnClose.Remove(splitWidget))
+                {
+                    _config.DesktopOrganizerSplitWidgets.Remove(placement);
+                    _store.SaveConfig(_config);
+                }
+
                 foreach (var item in splitCategories)
                 {
                     _splitDesktopCategories.Remove(item);
@@ -1892,8 +1921,33 @@ public sealed class MainForm : Form
         };
         _desktopOrganizerSplitWidgets.Add(splitWidget);
         _desktopOrganizerSplitWidgetCategories[splitWidget] = splitCategories;
+        _desktopOrganizerSplitWidgetPlacements[splitWidget] = placement;
         RefreshOrganizerMergeTargets();
-        splitWidget.ShowAsDesktopWidget(CreateOrganizerSplitPlacement(cascadeIndex));
+        _store.SaveConfig(_config);
+        splitWidget.ShowAsDesktopWidget(placement);
+    }
+
+    private void RestoreDesktopOrganizerSplitWidgets()
+    {
+        if (_desktopOrganizerSplitWidgets.Any(widget => !widget.IsDisposed))
+        {
+            return;
+        }
+
+        var placements = _config.DesktopOrganizerSplitWidgets
+            .Where(placement => placement.CategoryNames.Count > 0)
+            .ToArray();
+        for (var i = 0; i < placements.Length; i++)
+        {
+            var placement = placements[i];
+            var categories = _config.DesktopCategories
+                .Where(category => placement.CategoryNames.Contains(category.Name, StringComparer.Ordinal))
+                .Where(category => !_splitDesktopCategories.Contains(category))
+                .ToArray();
+            SplitDesktopOrganizerWidget(categories, i, placement);
+        }
+
+        _desktopOrganizerWidget?.RefreshWidget();
     }
 
     private void MergeDesktopOrganizerSplitWidget(DesktopOrganizerWidgetForm source, DesktopOrganizerMergeTarget target)
@@ -1906,6 +1960,12 @@ public sealed class MainForm : Form
 
         if (target.IsMain)
         {
+            if (_desktopOrganizerSplitWidgetPlacements.TryGetValue(source, out var sourcePlacement))
+            {
+                _config.DesktopOrganizerSplitWidgets.Remove(sourcePlacement);
+                _store.SaveConfig(_config);
+            }
+
             source.Close();
             return;
         }
@@ -1926,7 +1986,22 @@ public sealed class MainForm : Form
             targetCategories.Add(category);
         }
 
+        if (_desktopOrganizerSplitWidgetPlacements.TryGetValue(targetWidget, out var targetPlacement))
+        {
+            targetPlacement.CategoryNames = targetCategories
+                .Select(category => category.Name)
+                .Where(name => !string.IsNullOrWhiteSpace(name))
+                .Distinct(StringComparer.Ordinal)
+                .ToList();
+        }
+
+        if (_desktopOrganizerSplitWidgetPlacements.TryGetValue(source, out var sourcePlacementToRemove))
+        {
+            _config.DesktopOrganizerSplitWidgets.Remove(sourcePlacementToRemove);
+        }
+
         sourceCategories.Clear();
+        _store.SaveConfig(_config);
         targetWidget.RefreshWidget();
         source.Close();
     }
@@ -1959,13 +2034,13 @@ public sealed class MainForm : Form
         return string.Join("、", categories.Select(category => category.Name).Where(name => !string.IsNullOrWhiteSpace(name)));
     }
 
-    private static WidgetPlacement CreateOrganizerSplitPlacement(int cascadeIndex)
+    private static DesktopOrganizerSplitWidgetPlacement CreateOrganizerSplitPlacement(int cascadeIndex)
     {
         var workArea = Screen.PrimaryScreen?.WorkingArea ?? new Rectangle(0, 0, 1280, 720);
         const int width = 620;
         const int height = 520;
         var offset = Math.Max(0, cascadeIndex) * 32;
-        return new WidgetPlacement
+        return new DesktopOrganizerSplitWidgetPlacement
         {
             X = workArea.Right - width - 36 + offset,
             Y = workArea.Top + 88 + offset,
@@ -6168,6 +6243,7 @@ public sealed class MainForm : Form
         _config.DesktopSystemMonitorWidget = null;
         _config.DesktopSearchWidget = null;
         _config.DesktopClipboardWidget = null;
+        _config.DesktopOrganizerSplitWidgets.Clear();
         _config.DesktopNoteWidgets.Clear();
         _config.DesktopCategories.Clear();
         _config.DesktopCategories.AddRange(new[]
@@ -6815,6 +6891,16 @@ public sealed class MainForm : Form
         SavePlacement(_config.DesktopOrganizerWidget, bounds);
     }
 
+    private void SaveDesktopOrganizerSplitPlacement(DesktopOrganizerSplitWidgetPlacement placement, Rectangle bounds)
+    {
+        if (!_config.DesktopOrganizerSplitWidgets.Contains(placement))
+        {
+            _config.DesktopOrganizerSplitWidgets.Add(placement);
+        }
+
+        SavePlacement(placement, bounds);
+    }
+
     private static bool IsSuspiciousOrganizerPlacement(Rectangle bounds, WidgetPlacement current)
     {
         return current.Width > 0
@@ -6879,7 +6965,8 @@ public sealed class MainForm : Form
 
     private void RestoreDesktopWidgets()
     {
-        if (_config.DesktopOrganizerWidget is { Visible: true } organizerPlacement)
+        if (_config.DesktopOrganizerWidget is { Visible: true } organizerPlacement
+            || _config.DesktopOrganizerSplitWidgets.Any(placement => placement.Visible))
         {
             ShowDesktopOrganizerWidget(false);
         }
@@ -18047,7 +18134,7 @@ internal sealed class DesktopClipboardWidgetView : Control
         _menu.Items.Add(appearanceMenu);
         _menu.Items.Add(new ToolStripSeparator());
         var settingsMenuItem = _menu.Items.Add("剪贴板管理", null, (_, _) => ManageRequested?.Invoke());
-        SetMenuIcon(settingsMenuItem, "Menu", "jiantieban.png");
+        SetMenuIcon(settingsMenuItem, "Menu", "jiantianban.png");
         _menu.Opened += (_, _) => _menuDismissTimer.Start();
         _menu.Closed += (_, _) => _menuDismissTimer.Stop();
         _menu.Opening += (_, e) =>
@@ -20130,6 +20217,9 @@ internal sealed class SettingsPageCanvas : Control
     private readonly List<(Rectangle Rect, string Key)> _hotspots = new();
     private string _dataDirectory;
     private string? _hoverKey;
+    private bool _showVersionInfo;
+    private int _versionScrollOffset;
+    private int _versionContentHeight;
 
     private static readonly Color Back = Color.FromArgb(22, 30, 42);
     private static readonly Color CardFill = Color.FromArgb(118, 30, 40, 56);
@@ -20185,8 +20275,16 @@ internal sealed class SettingsPageCanvas : Control
             g.FillRectangle(back, ClientRectangle);
         }
 
-        TextRenderer.DrawText(g, "设置中心", HeaderFont, new Rectangle(0, 0, Width, 70), TextMain, TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis);
-        DrawSettings(g, new Rectangle(0, 112, Math.Max(1, Width - 10), Math.Max(1, Height - 138)));
+        TextRenderer.DrawText(g, _showVersionInfo ? "版本信息" : "设置中心", HeaderFont, new Rectangle(0, 0, Width, 70), TextMain, TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis);
+        var contentRect = new Rectangle(0, 112, Math.Max(1, Width - 10), Math.Max(1, Height - 118));
+        if (_showVersionInfo)
+        {
+            DrawVersionInfo(g, contentRect);
+        }
+        else
+        {
+            DrawSettings(g, contentRect);
+        }
         PositionInputs();
     }
 
@@ -20211,6 +20309,8 @@ internal sealed class SettingsPageCanvas : Control
         y += 62;
         DrawActionLine(g, x, y, "检测版本", "checkVersion", "检测", $"当前版本 v{UpdateChecker.CurrentVersionText}，点击后检测是否有新版本", false);
         y += 52;
+        DrawActionLine(g, x, y, "版本信息", "versionInfo", "查看", "查看使用教程和版本更新记录", false);
+        y += 52;
         DrawActionLine(g, x, y, "恢复桌面布局", "restore", "恢复到桌面", "将桌面收纳中的所有项目移回系统桌面", false);
         y += 52;
         DrawActionLine(g, x, y, "导出项目管理", "export", "导出 Excel", "导出 xlsx 表格，项目、事项、子任务路径会写入超链接", false);
@@ -20220,6 +20320,102 @@ internal sealed class SettingsPageCanvas : Control
         DrawActionLine(g, x, y, "关于我的", "about", "关注抖音", "反馈问题和咨询", false);
         y += 50;
         DrawActionLine(g, x, y, "重置所有数据", "reset", "重置", "清空所有应用数据，收纳内容会先恢复到桌面", true);
+    }
+
+    private void DrawVersionInfo(Graphics g, Rectangle rect)
+    {
+        DrawRoundRect(g, rect, CardFill, CardBorder, 10);
+        var back = new Rectangle(rect.X + 28, rect.Y + 20, 90, 32);
+        DrawButton(g, back, "返回", true, _hoverKey == "versionBack", false);
+        _hotspots.Add((back, "versionBack"));
+        TextRenderer.DrawText(g, $"当前版本 v{UpdateChecker.CurrentVersionText}", SectionFont, new Rectangle(back.Right + 18, rect.Y + 20, rect.Width - 150, 32), TextMain, TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis);
+
+        var content = new Rectangle(rect.X + 28, rect.Y + 68, rect.Width - 56, rect.Height - 92);
+        _versionScrollOffset = Math.Max(0, _versionScrollOffset);
+        var y = content.Y - _versionScrollOffset;
+
+        DrawVersionSection(g, content, "1.5.1 修复记录", new[]
+        {
+            "修复桌面收纳拆分后重新打开又自动合并的问题。拆分组件现在会保存分类、位置、大小、折叠状态和展开尺寸。",
+            "修复拆分组件合并后的配置同步问题。合并回主收纳会删除拆分记录，合并到其他拆分组件会更新目标分类列表。",
+            "剪贴板侧边栏入口和剪贴板管理菜单使用新图标 images/Menu/jiantianban.png，桌面剪贴板标题栏保留原图标。"
+        }, content.X, ref y, content.Width);
+        DrawVersionSection(g, content, "1.5.0 更新记录", new[]
+        {
+            "设置中心新增手动检测版本，启动时不再自动检查更新，用户点击“检测版本”后才会联网检测。",
+            "桌面收纳、工作记录、项目管理、剪贴板支持折叠和自动折叠。开启后 10 秒无操作会自动只保留标题栏。",
+            "组件标题栏左键双击可主动折叠或展开，左键按住标题栏可拖动位置，折叠状态下右上角菜单仍可点击。",
+            "优化扩展屏下组件坐标记录，减少折叠、展开、拖动时跳屏、偏移、消失的问题。",
+            "主窗口问候语显示电脑名称，支持双击修改；右上角三个窗口按钮改为 Canvas 绘制，减少缩放闪烁。"
+        }, content.X, ref y, content.Width);
+        DrawVersionSection(g, content, "桌面收纳详细教程", new[]
+        {
+            "进入桌面收纳后，可以按用途创建分类，例如工作、开发、素材、工具、临时文件。分类越清楚，后续查找和恢复越方便。",
+            "把系统桌面上的文件或文件夹拖入分类后，文件会移动到 DustDesk 数据目录，并在分类中显示。桌面会变干净，文件仍可从收纳中打开。",
+            "需要恢复文件时，可以从收纳组件拖出，也可以在设置中心点击恢复桌面布局，把收纳内容批量移回系统桌面。",
+            "常用分类可以拆分成独立桌面组件。拆分后该分类不再显示在主收纳组件中，而是单独显示在桌面上。",
+            "拆分组件可以合并回主收纳，也可以合并到其他拆分组件。合并后分类列表和配置会同步保存。"
+        }, content.X, ref y, content.Width);
+        DrawVersionSection(g, content, "桌面组件详细教程", new[]
+        {
+            "设置中心的桌面组件显示区域可以控制搜索、桌面收纳、工作记录、便签、项目管理、快捷启动、系统检测、剪贴板是否显示。",
+            "把鼠标放在组件标题栏，按住左键拖动即可移动位置。位置会保存，下次打开仍在原来的屏幕和位置。",
+            "桌面收纳、工作记录、项目管理、剪贴板支持折叠。标题栏左键双击可以在折叠和展开之间切换。",
+            "开启自动折叠后，组件 10 秒无操作会自动折叠。折叠后仍可点击菜单，也可按住标题栏拖动。"
+        }, content.X, ref y, content.Width);
+        DrawVersionSection(g, content, "工作记录详细教程", new[]
+        {
+            "进入工作记录后，可以添加当天待办、工作事项或临时任务，用来记录今天要完成的内容。",
+            "编辑记录时可以设置标签、备注和提醒时间。到达提醒时间后，软件会通过托盘提醒。",
+            "桌面工作记录组件适合放在桌面查看当天任务，支持透明度、拖动、折叠和自动折叠。"
+        }, content.X, ref y, content.Width);
+        DrawVersionSection(g, content, "项目管理详细教程", new[]
+        {
+            "进入项目管理后，可以创建项目、阶段、任务和子任务，适合管理开发、设计、交付等长期事项。",
+            "项目可以绑定本地路径，方便快速打开目录；导出 Excel 时，项目和任务路径会写入超链接。",
+            "项目桌面组件会显示项目进度，也可以把重点项目拆分成独立桌面组件长期查看。"
+        }, content.X, ref y, content.Width);
+        DrawVersionSection(g, content, "剪贴板详细教程", new[]
+        {
+            "软件运行时会记录文本和图片剪贴板历史。进入剪贴板页面可以查看、复制、删除或清空记录。",
+            "点击历史记录可以把内容重新复制回系统剪贴板。重要记录建议置顶或锁定，避免被清理。",
+            "桌面剪贴板组件可快速查看最近复制内容，支持置顶、透明度、拖动、折叠和自动折叠。"
+        }, content.X, ref y, content.Width);
+        DrawVersionSection(g, content, "设置中心详细教程", new[]
+        {
+            "设置中心可以管理开机启动、启动隐藏到托盘、桌面组件显示、快捷键、文件保存路径、检测版本和版本信息。",
+            "快捷键格式示例为 Ctrl+Shift+K 或 Ctrl+Alt+Space。修改后点击保存才会生效。",
+            "文件保存路径用于指定 DustDesk 数据目录。换版本或换目录后，可以选择原来的数据文件夹继续读取。",
+            "版本信息在当前窗口内查看，最新更新放在最前面；检测版本只会在点击按钮后执行。"
+        }, content.X, ref y, content.Width);
+
+        _versionContentHeight = Math.Max(0, y - (content.Y - _versionScrollOffset));
+        _versionScrollOffset = Math.Clamp(_versionScrollOffset, 0, Math.Max(0, _versionContentHeight - content.Height));
+    }
+
+    private static void DrawVersionSection(Graphics g, Rectangle view, string title, string[] lines, int x, ref int y, int width)
+    {
+        var titleRect = new Rectangle(x, y, width, 30);
+        if (titleRect.Top >= view.Top && titleRect.Top < view.Bottom)
+        {
+            TextRenderer.DrawText(g, title, SectionFont, titleRect, TextMain, TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis);
+        }
+
+        y += 34;
+        foreach (var line in lines)
+        {
+            var text = "- " + line;
+            var lineHeight = Math.Max(32, TextRenderer.MeasureText(g, text, NormalFont, new Size(width - 8, 0), TextFormatFlags.WordBreak).Height + 8);
+            var lineRect = new Rectangle(x + 8, y, width - 8, lineHeight);
+            if (lineRect.Top >= view.Top && lineRect.Top < view.Bottom)
+            {
+                TextRenderer.DrawText(g, text, NormalFont, lineRect, TextSubtle, TextFormatFlags.Left | TextFormatFlags.Top | TextFormatFlags.WordBreak);
+            }
+
+            y += lineHeight;
+        }
+
+        y += 18;
     }
 
     private void DrawToggleLine(Graphics g, int x, int y, string key, string title, bool enabled)
@@ -20315,12 +20511,32 @@ internal sealed class SettingsPageCanvas : Control
 
     private void PositionInputs()
     {
+        _mainHotKeyBox.Visible = !_showVersionInfo;
+        _desktopHotKeyBox.Visible = !_showVersionInfo;
+        if (_showVersionInfo)
+        {
+            return;
+        }
+
         var area = new Rectangle(0, 112, Math.Max(1, Width - 10), Math.Max(1, Height - 138));
         var x = area.X + 28;
         var y = area.Y + 20 + 40 + 46 + 46 + 82;
         _mainHotKeyBox.SetBounds(x + 176, y + 4, 180, 28);
         y += 56;
         _desktopHotKeyBox.SetBounds(x + 176, y + 4, 180, 28);
+    }
+
+    protected override void OnMouseWheel(MouseEventArgs e)
+    {
+        if (_showVersionInfo)
+        {
+            var viewHeight = Math.Max(1, Height - 210);
+            _versionScrollOffset = Math.Clamp(_versionScrollOffset - e.Delta / 4, 0, Math.Max(0, _versionContentHeight - viewHeight));
+            Invalidate();
+            return;
+        }
+
+        base.OnMouseWheel(e);
     }
 
     protected override void OnMouseMove(MouseEventArgs e)
@@ -20360,6 +20576,8 @@ internal sealed class SettingsPageCanvas : Control
             case "desktopSave": DesktopHotKeySaveRequested?.Invoke(_desktopHotKeyBox.Text); break;
             case "choosePath": ChooseDataPathRequested?.Invoke(); break;
             case "checkVersion": CheckVersionRequested?.Invoke(); break;
+            case "versionInfo": _showVersionInfo = true; _versionScrollOffset = 0; Invalidate(); break;
+            case "versionBack": _showVersionInfo = false; Invalidate(); break;
             case "restore": RestoreDesktopRequested?.Invoke(); break;
             case "export": ExportProjectsRequested?.Invoke(); break;
             case "intro": IntroRequested?.Invoke(); break;
