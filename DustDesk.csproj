@@ -8,7 +8,7 @@
     <ApplicationHighDpiMode>PerMonitorV2</ApplicationHighDpiMode>
     <AssemblyName>DustDesk</AssemblyName>
     <RootNamespace>DustDesk</RootNamespace>
-    <Version>1.5.1</Version>
+    <Version>1.6.0</Version>
     <DefaultItemExcludes>$(DefaultItemExcludes);bin\**;obj\**;obj-resizable\**</DefaultItemExcludes>
   </PropertyGroup>
   <ItemGroup>

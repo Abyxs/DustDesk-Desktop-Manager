@@ -48,9 +48,6 @@ public sealed class MainForm : Form
     private const int MainWindowHotKeyId = 0x4444;
     private const int DesktopOrganizerHotKeyId = 0x4445;
     private const int MaxClipboardHistoryItems = 100;
-    private const string SearchSettingsIconPath = @"D:\APP\fuzhu\xiangmu\DustDesk\images\Menu\sousuo.png";
-    private const string SystemMonitorIconPath = @"D:\APP\fuzhu\xiangmu\DustDesk\images\Menu\jiance.png";
-    private const string SettingsCenterIconPath = @"D:\APP\fuzhu\xiangmu\DustDesk\images\Menu\shezhizhognxin.png";
     private const uint RedrawInvalidate = 0x0001;
     private const uint RedrawInternalPaint = 0x0002;
     private const uint RedrawErase = 0x0004;
@@ -105,9 +102,12 @@ public sealed class MainForm : Form
     private bool _mainResizing;
     private bool _clipboardListenerRegistered;
     private Action? _refreshClipboardPage;
+    private SettingsPageCanvas? _settingsPageCanvas;
+    private UpdateInfo? _availableUpdate;
     private bool _closingDesktopNoteWidgets;
     private bool _closingApp;
     private bool _exitRequested;
+    private bool _isCheckingForUpdates;
 
     private static readonly Color BackColorMain = Color.FromArgb(22, 30, 42);
     private static readonly Color PanelColor = Color.FromArgb(46, 56, 72);
@@ -170,6 +170,7 @@ public sealed class MainForm : Form
         }
 
         Shown += (_, _) => BeginInvoke(new Action(CheckTodoReminders));
+        Shown += (_, _) => BeginInvoke(new Action(CheckForUpdatesSilently));
     }
 
     protected override CreateParams CreateParams
@@ -598,15 +599,7 @@ public sealed class MainForm : Form
 
         for (var i = 0; i < files.Length; i++)
         {
-            var path = i == 7 && File.Exists(SearchSettingsIconPath)
-                ? SearchSettingsIconPath
-                : i == 8 && File.Exists(SystemMonitorIconPath)
-                ? SystemMonitorIconPath
-                : i == 9 && File.Exists(SettingsCenterIconPath)
-                ? SettingsCenterIconPath
-                : files[i] is null
-                    ? null
-                    : FindMenuIconPath(files[i]!);
+            var path = files[i] is null ? null : FindMenuIconPath(files[i]!);
             if (path is null)
             {
                 continue;
@@ -2919,6 +2912,16 @@ public sealed class MainForm : Form
             && project.Items.Count == 0) > 0;
     }
 
+    private bool ConfirmDangerousActionTwice(string title, string actionText, string targetName)
+    {
+        return ConfirmationDialogs.ConfirmDangerousActionTwice(this, title, actionText, targetName);
+    }
+
+    private bool ConfirmDeleteTwice(string targetName)
+    {
+        return ConfirmationDialogs.ConfirmDeleteTwice(this, targetName);
+    }
+
     private static string GetGreeting()
     {
         var hour = DateTime.Now.Hour;
@@ -3783,6 +3786,11 @@ public sealed class MainForm : Form
         };
         canvas.DeleteCategoryRequested += category =>
         {
+            if (!ConfirmDeleteTwice("这个桌面分类"))
+            {
+                return;
+            }
+
             _config.DesktopCategories.Remove(category);
             _store.SaveConfig(_config);
             RefreshAll();
@@ -3868,6 +3876,11 @@ public sealed class MainForm : Form
         };
         canvas.DeleteRequested += item =>
         {
+            if (!ConfirmDeleteTwice("这个任务"))
+            {
+                return;
+            }
+
             _todos.Items.Remove(item);
             SaveTodos();
             canvas.RefreshData();
@@ -3927,6 +3940,11 @@ public sealed class MainForm : Form
         canvas.DeleteRequested += item =>
         {
             SaveActiveNote();
+            if (!ConfirmDeleteTwice("这条便签"))
+            {
+                return;
+            }
+
             _notes.Items.Remove(item);
             if (_notes.Items.Count == 0)
             {
@@ -4062,6 +4080,11 @@ public sealed class MainForm : Form
         canvas.ClearImageRequested += item =>
         {
             SaveActiveNote();
+            if (!ConfirmDangerousActionTwice("清除确认", "清除", "这条便签的背景图片"))
+            {
+                return;
+            }
+
             item.BackgroundImagePath = null;
             item.ImageOnly = false;
             item.UpdatedAt = DateTime.Now;
@@ -4118,6 +4141,11 @@ public sealed class MainForm : Form
         };
         canvas.DeleteProjectRequested += project =>
         {
+            if (!ConfirmDeleteTwice("这个项目"))
+            {
+                return;
+            }
+
             _projects.Projects.Remove(project);
             SaveAndRefresh();
         };
@@ -4174,6 +4202,11 @@ public sealed class MainForm : Form
         };
         canvas.DeleteItemRequested += (project, item) =>
         {
+            if (!ConfirmDeleteTwice("这个阶段"))
+            {
+                return;
+            }
+
             project.Items.Remove(item);
             SaveAndRefresh(project);
         };
@@ -4219,6 +4252,11 @@ public sealed class MainForm : Form
         };
         canvas.DeleteSubItemRequested += (item, subItem) =>
         {
+            if (!ConfirmDeleteTwice("这个子任务"))
+            {
+                return;
+            }
+
             item.SubItems.Remove(subItem);
             SaveAndRefresh(item: item);
         };
@@ -4800,6 +4838,11 @@ public sealed class MainForm : Form
         };
         canvas.DeleteRequested += item =>
         {
+            if (!ConfirmDeleteTwice("这个快捷启动项"))
+            {
+                return;
+            }
+
             _launchers.Items.Remove(item);
             _store.SaveLaunchers(_launchers);
             canvas.ClearSelection();
@@ -4834,6 +4877,11 @@ public sealed class MainForm : Form
         canvas.CopyRequested += CopyClipboardHistoryItem;
         canvas.DeleteRequested += item =>
         {
+            if (!ConfirmDeleteTwice("这条剪贴板历史"))
+            {
+                return;
+            }
+
             _clipboard.Items.Remove(item);
             _store.SaveClipboard(_clipboard);
             RefreshDesktopClipboardWidget();
@@ -4846,8 +4894,7 @@ public sealed class MainForm : Form
                 return;
             }
 
-            var result = MessageBox.Show(this, "确定清除全部剪贴板历史吗？", "DustDesk", MessageBoxButtons.YesNo, MessageBoxIcon.Question);
-            if (result != DialogResult.Yes)
+            if (!ConfirmDangerousActionTwice("清空剪贴板历史", "清空", "全部未锁定剪贴板历史"))
             {
                 return;
             }
@@ -5197,6 +5244,11 @@ public sealed class MainForm : Form
         };
         canvas.ClearCustomPathsRequested += () =>
         {
+            if (!ConfirmDangerousActionTwice("清空搜索路径", "清空", "自定义搜索路径"))
+            {
+                return;
+            }
+
             _config.SearchCustomRoots.Clear();
             _store.SaveConfig(_config);
             _desktopSearchWidget?.RefreshSearch();
@@ -5300,6 +5352,11 @@ public sealed class MainForm : Form
         };
         clearButton.Click += (_, _) =>
         {
+            if (!ConfirmDangerousActionTwice("清空搜索路径", "清空", "自定义搜索路径"))
+            {
+                return;
+            }
+
             _config.SearchCustomRoots.Clear();
             _store.SaveConfig(_config);
             _desktopSearchWidget?.RefreshSearch();
@@ -5400,10 +5457,20 @@ public sealed class MainForm : Form
             _config,
             _store.DataDirectory,
             IsAutoStartEnabled,
-            HasVisibleDesktopNoteWidgets)
+            HasVisibleDesktopNoteWidgets,
+            () => _availableUpdate,
+            () => _isCheckingForUpdates)
         {
             Dock = DockStyle.Fill,
             BackColor = BackColorMain
+        };
+        _settingsPageCanvas = canvas;
+        canvas.Disposed += (_, _) =>
+        {
+            if (ReferenceEquals(_settingsPageCanvas, canvas))
+            {
+                _settingsPageCanvas = null;
+            }
         };
         canvas.AutoStartChanged += value =>
         {
@@ -5498,6 +5565,8 @@ public sealed class MainForm : Form
         };
         canvas.RestoreDesktopRequested += RestoreAllDesktopItems;
         canvas.ExportProjectsRequested += ExportProjectsToExcel;
+        canvas.BackupRequested += BackupAllData;
+        canvas.RestoreBackupRequested += RestoreAllDataFromBackup;
         canvas.CheckVersionRequested += CheckForUpdatesManually;
         canvas.IntroRequested += () => MessageBox.Show(
             this,
@@ -6075,6 +6144,296 @@ public sealed class MainForm : Form
         catch (Exception ex)
         {
             MessageBox.Show(this, $"导出失败：{ex.Message}", "DustDesk", MessageBoxButtons.OK, MessageBoxIcon.Error);
+        }
+    }
+
+    private void BackupAllData()
+    {
+        using var dialog = new SaveFileDialog
+        {
+            Title = "备份 DustDesk 数据",
+            Filter = "DustDesk 备份文件|*.zip",
+            FileName = $"DustDesk_Backup_{DateTime.Now:yyyyMMdd_HHmmss}.zip",
+            InitialDirectory = Directory.Exists(_store.DataDirectory) ? _store.DataDirectory : AppContext.BaseDirectory,
+            OverwritePrompt = true,
+            AddExtension = true,
+            DefaultExt = "zip"
+        };
+
+        if (dialog.ShowDialog(this) != DialogResult.OK || string.IsNullOrWhiteSpace(dialog.FileName))
+        {
+            return;
+        }
+
+        var backupPath = Path.GetFullPath(dialog.FileName);
+        if (File.Exists(backupPath)
+            && !ConfirmDangerousActionTwice("覆盖备份", "覆盖", "这个备份文件"))
+        {
+            return;
+        }
+
+        try
+        {
+            SaveCurrentBackupState();
+            CreateDataBackup(backupPath, backupPath);
+            MessageBox.Show(this, $"已备份：{backupPath}", "DustDesk", MessageBoxButtons.OK, MessageBoxIcon.Information);
+        }
+        catch (Exception ex)
+        {
+            MessageBox.Show(this, $"备份失败：{ex.Message}", "DustDesk", MessageBoxButtons.OK, MessageBoxIcon.Error);
+        }
+    }
+
+    private void RestoreAllDataFromBackup()
+    {
+        using var dialog = new OpenFileDialog
+        {
+            Title = "恢复 DustDesk 备份",
+            Filter = "DustDesk 备份文件|*.zip",
+            InitialDirectory = Directory.Exists(_store.DataDirectory) ? _store.DataDirectory : AppContext.BaseDirectory,
+            CheckFileExists = true,
+            Multiselect = false
+        };
+
+        if (dialog.ShowDialog(this) != DialogResult.OK || string.IsNullOrWhiteSpace(dialog.FileName))
+        {
+            return;
+        }
+
+        if (!ConfirmDangerousActionTwice("恢复备份", "恢复", "这份备份"))
+        {
+            return;
+        }
+
+        var tempRestorePath = Path.Combine(Path.GetTempPath(), $"DustDesk.restore-{Guid.NewGuid():N}.zip");
+        var rollbackPath = "";
+        var touchedCurrentData = false;
+        try
+        {
+            File.Copy(dialog.FileName, tempRestorePath, overwrite: true);
+            ValidateBackupArchive(tempRestorePath);
+            SaveCurrentBackupState();
+            rollbackPath = CreateRollbackBackup();
+            CloseDesktopWidgetsForReset();
+            touchedCurrentData = true;
+            ClearDirectoryContents(_store.DataDirectory);
+            ExtractBackupArchive(tempRestorePath, _store.DataDirectory);
+            MessageBox.Show(this, $"已恢复备份。\n恢复前数据已备份：{rollbackPath}\n程序将重启后读取。", "DustDesk", MessageBoxButtons.OK, MessageBoxIcon.Information);
+            _exitRequested = true;
+            _closingApp = true;
+            Application.Restart();
+            Close();
+        }
+        catch (Exception ex)
+        {
+            var rollbackRestored = false;
+            if (!string.IsNullOrWhiteSpace(rollbackPath) && File.Exists(rollbackPath))
+            {
+                try
+                {
+                    ClearDirectoryContents(_store.DataDirectory);
+                    ExtractBackupArchive(rollbackPath, _store.DataDirectory);
+                    rollbackRestored = true;
+                }
+                catch
+                {
+                }
+            }
+
+            var rollbackMessage = rollbackRestored
+                ? "\n已自动回滚到恢复前数据。"
+                : string.IsNullOrWhiteSpace(rollbackPath) ? "" : $"\n恢复前备份：{rollbackPath}";
+            MessageBox.Show(this, $"恢复失败：{ex.Message}{rollbackMessage}", "DustDesk", MessageBoxButtons.OK, MessageBoxIcon.Error);
+            if (rollbackRestored && touchedCurrentData)
+            {
+                _exitRequested = true;
+                _closingApp = true;
+                Application.Restart();
+                Close();
+            }
+        }
+        finally
+        {
+            TryDeleteFile(tempRestorePath);
+        }
+    }
+
+    private void SaveCurrentBackupState()
+    {
+        _noteSaveTimer?.Stop();
+        SaveActiveNote();
+        _desktopOrganizerWidget?.SaveCurrentPlacement();
+        foreach (var widget in _desktopOrganizerSplitWidgets.ToArray())
+        {
+            if (!widget.IsDisposed)
+            {
+                widget.SaveCurrentPlacement();
+            }
+        }
+
+        SaveAllData();
+    }
+
+    private string CreateRollbackBackup()
+    {
+        var backupDirectory = GetBackupDirectory();
+        var path = Path.Combine(backupDirectory, $"DustDesk_before_restore_{DateTime.Now:yyyyMMdd_HHmmss}.zip");
+        CreateDataBackup(path);
+        return path;
+    }
+
+    private string GetBackupDirectory()
+    {
+        var dataDirectory = TrimPathEnd(Path.GetFullPath(_store.DataDirectory));
+        var parent = Path.GetDirectoryName(dataDirectory);
+        if (string.IsNullOrWhiteSpace(parent))
+        {
+            parent = Path.GetTempPath();
+        }
+
+        Directory.CreateDirectory(parent);
+        return parent;
+    }
+
+    private void CreateDataBackup(string backupPath, string? excludedPath = null)
+    {
+        var directory = Path.GetDirectoryName(backupPath);
+        if (!string.IsNullOrWhiteSpace(directory))
+        {
+            Directory.CreateDirectory(directory);
+        }
+
+        var dataRoot = Path.GetFullPath(_store.DataDirectory);
+        using var stream = new FileStream(backupPath, FileMode.Create, FileAccess.ReadWrite, FileShare.None);
+        using var archive = new ZipArchive(stream, ZipArchiveMode.Create);
+        var info = archive.CreateEntry("__dustdesk_backup_info.txt", CompressionLevel.Fastest);
+        using (var writer = new StreamWriter(info.Open(), Encoding.UTF8))
+        {
+            writer.WriteLine("DustDesk backup");
+            writer.WriteLine($"Version: {UpdateChecker.CurrentVersionText}");
+            writer.WriteLine($"CreatedAt: {DateTime.Now:yyyy-MM-dd HH:mm:ss}");
+            writer.WriteLine($"DataDirectory: {_store.DataDirectory}");
+        }
+
+        foreach (var file in Directory.EnumerateFiles(dataRoot, "*", SearchOption.AllDirectories))
+        {
+            var fullPath = Path.GetFullPath(file);
+            if ((excludedPath is not null && IsSamePath(fullPath, excludedPath))
+                || string.Equals(Path.GetExtension(fullPath), ".tmp", StringComparison.OrdinalIgnoreCase))
+            {
+                continue;
+            }
+
+            var relativePath = Path.GetRelativePath(dataRoot, fullPath);
+            if (relativePath.StartsWith("..", StringComparison.Ordinal) || Path.IsPathRooted(relativePath))
+            {
+                continue;
+            }
+
+            archive.CreateEntryFromFile(fullPath, NormalizeZipEntryName(relativePath), CompressionLevel.Optimal);
+        }
+    }
+
+    private static void ValidateBackupArchive(string backupPath)
+    {
+        using var archive = ZipFile.OpenRead(backupPath);
+        if (!archive.Entries.Any(entry => string.Equals(NormalizeZipEntryName(entry.FullName), "config.json", StringComparison.OrdinalIgnoreCase)))
+        {
+            throw new InvalidDataException("备份文件不完整，缺少 config.json。");
+        }
+    }
+
+    private static void ExtractBackupArchive(string backupPath, string targetDirectory)
+    {
+        Directory.CreateDirectory(targetDirectory);
+        var targetRoot = TrimPathEnd(Path.GetFullPath(targetDirectory)) + Path.DirectorySeparatorChar;
+        using var archive = ZipFile.OpenRead(backupPath);
+        foreach (var entry in archive.Entries)
+        {
+            if (string.IsNullOrWhiteSpace(entry.FullName) || string.Equals(entry.FullName, "__dustdesk_backup_info.txt", StringComparison.OrdinalIgnoreCase))
+            {
+                continue;
+            }
+
+            var destination = Path.GetFullPath(Path.Combine(targetDirectory, entry.FullName.Replace('/', Path.DirectorySeparatorChar)));
+            if (!destination.StartsWith(targetRoot, StringComparison.OrdinalIgnoreCase))
+            {
+                throw new InvalidDataException("备份文件包含非法路径。");
+            }
+
+            if (string.IsNullOrWhiteSpace(entry.Name))
+            {
+                Directory.CreateDirectory(destination);
+                continue;
+            }
+
+            var destinationDirectory = Path.GetDirectoryName(destination);
+            if (!string.IsNullOrWhiteSpace(destinationDirectory))
+            {
+                Directory.CreateDirectory(destinationDirectory);
+            }
+
+            entry.ExtractToFile(destination, overwrite: true);
+        }
+    }
+
+    private static void ClearDirectoryContents(string directory)
+    {
+        Directory.CreateDirectory(directory);
+        foreach (var file in Directory.EnumerateFiles(directory))
+        {
+            File.SetAttributes(file, FileAttributes.Normal);
+            File.Delete(file);
+        }
+
+        foreach (var childDirectory in Directory.EnumerateDirectories(directory))
+        {
+            NormalizeDirectoryAttributes(childDirectory);
+            Directory.Delete(childDirectory, recursive: true);
+        }
+    }
+
+    private static void NormalizeDirectoryAttributes(string directory)
+    {
+        foreach (var file in Directory.EnumerateFiles(directory, "*", SearchOption.AllDirectories))
+        {
+            File.SetAttributes(file, FileAttributes.Normal);
+        }
+
+        foreach (var childDirectory in Directory.EnumerateDirectories(directory, "*", SearchOption.AllDirectories))
+        {
+            File.SetAttributes(childDirectory, FileAttributes.Normal);
+        }
+
+        File.SetAttributes(directory, FileAttributes.Normal);
+    }
+
+    private static bool IsSamePath(string left, string right)
+    {
+        return string.Equals(TrimPathEnd(Path.GetFullPath(left)), TrimPathEnd(Path.GetFullPath(right)), StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static string TrimPathEnd(string path)
+    {
+        return path.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+    }
+
+    private static string NormalizeZipEntryName(string path)
+    {
+        return path.Replace('\\', '/').TrimStart('/');
+    }
+
+    private static void TryDeleteFile(string path)
+    {
+        try
+        {
+            if (File.Exists(path))
+            {
+                File.Delete(path);
+            }
+        }
+        catch
+        {
         }
     }
 
@@ -6695,15 +7054,58 @@ public sealed class MainForm : Form
         }
     }
 
+    private async void CheckForUpdatesSilently()
+    {
+        if (_availableUpdate is not null || _isCheckingForUpdates || IsDisposed)
+        {
+            return;
+        }
+
+        _isCheckingForUpdates = true;
+        RefreshUpdateStateUi();
+        try
+        {
+            SetAvailableUpdate(await UpdateChecker.CheckLatestAsync());
+        }
+        catch
+        {
+        }
+        finally
+        {
+            _isCheckingForUpdates = false;
+            RefreshUpdateStateUi();
+        }
+    }
+
     private async void CheckForUpdatesManually()
     {
+        if (_availableUpdate is not null)
+        {
+            await ShowUpdatePromptAsync(_availableUpdate);
+            return;
+        }
+
+        if (_isCheckingForUpdates)
+        {
+            return;
+        }
+
         UseWaitCursor = true;
+        _isCheckingForUpdates = true;
+        RefreshUpdateStateUi();
         try
         {
             var update = await UpdateChecker.CheckLatestAsync();
             if (update is null || IsDisposed)
             {
+                SetAvailableUpdate(null);
                 MessageBox.Show(this, $"当前已是最新版本 v{UpdateChecker.CurrentVersionText}。", "DustDesk 更新", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                return;
+            }
+
+            SetAvailableUpdate(update);
+            if (_availableUpdate is not null)
+            {
                 return;
             }
 
@@ -6724,7 +7126,44 @@ public sealed class MainForm : Form
         }
         finally
         {
+            _isCheckingForUpdates = false;
             UseWaitCursor = false;
+            RefreshUpdateStateUi();
+        }
+    }
+
+    private async Task ShowUpdatePromptAsync(UpdateInfo update)
+    {
+        var result = MessageBox.Show(
+            this,
+            $"发现新版本 v{update.VersionText}。\n当前版本 v{UpdateChecker.CurrentVersionText}。\n\n是否立即下载并自动安装？\n安装时会退出 DustDesk，完成后自动重启。",
+            "DustDesk 更新",
+            MessageBoxButtons.YesNo,
+            MessageBoxIcon.Information);
+        if (result == DialogResult.Yes)
+        {
+            await InstallUpdateAsync(update);
+        }
+    }
+
+    private void SetAvailableUpdate(UpdateInfo? update)
+    {
+        if (IsDisposed)
+        {
+            return;
+        }
+
+        _availableUpdate = update;
+        _nav.SetBadge(10, update is not null);
+        RefreshUpdateStateUi();
+    }
+
+    private void RefreshUpdateStateUi()
+    {
+        _nav.Invalidate();
+        if (_settingsPageCanvas is not null && !_settingsPageCanvas.IsDisposed)
+        {
+            _settingsPageCanvas.RefreshData(_store.DataDirectory);
         }
     }
 
@@ -7974,6 +8413,28 @@ internal sealed class GlassPanel : Panel
     }
 }
 
+internal static class ConfirmationDialogs
+{
+    public static bool ConfirmDangerousActionTwice(IWin32Window owner, string title, string actionText, string targetName)
+    {
+        var firstPrompt = $"确定要{actionText}{targetName}吗？";
+        var secondPrompt = $"第二次确认：{actionText}{targetName}后无法从程序内撤销。\n\n确定继续？";
+
+        return MessageBox.Show(owner, firstPrompt, title, MessageBoxButtons.OKCancel, MessageBoxIcon.Warning) == DialogResult.OK
+            && MessageBox.Show(owner, secondPrompt, title, MessageBoxButtons.OKCancel, MessageBoxIcon.Warning) == DialogResult.OK;
+    }
+
+    public static bool ConfirmDeleteTwice(IWin32Window owner, string targetName)
+    {
+        return ConfirmDangerousActionTwice(owner, "删除确认", "删除", targetName);
+    }
+
+    public static bool ConfirmRemoveDesktopComponent(IWin32Window owner)
+    {
+        return ConfirmDangerousActionTwice(owner, "移除组件", "移除", "这个桌面组件");
+    }
+}
+
 internal static class NoteStyle
 {
     public static int NormalizeTextColorArgb(int argb)
@@ -8120,7 +8581,13 @@ internal sealed class DesktopTodoWidgetForm : Form
         _view.AutoCollapseChanged += value => SetAutoCollapseEnabled(value, save: true, collapse: true);
         _view.ExpandCollapsedRequested += ExpandFromCollapsed;
         _view.UserActivityDetected += ResetAutoCollapseTimer;
-        _view.CloseRequested += Close;
+        _view.CloseRequested += () =>
+        {
+            if (ConfirmationDialogs.ConfirmRemoveDesktopComponent(this))
+            {
+                Close();
+            }
+        };
         Controls.Add(_view);
         _autoCollapseTimer.Tick += (_, _) =>
         {
@@ -8603,7 +9070,13 @@ internal sealed class DesktopLauncherWidgetForm : Form
                 NativeGlass.BeginResize(Handle, 17);
             }
         };
-        _view.CloseRequested += Close;
+        _view.CloseRequested += () =>
+        {
+            if (ConfirmationDialogs.ConfirmRemoveDesktopComponent(this))
+            {
+                Close();
+            }
+        };
         _view.ManageRequested += () => ManageRequested?.Invoke();
         _view.LockPositionChanged += SetPositionLocked;
         _view.ChromeVisibilityChanged += AdjustChromeHeight;
@@ -8679,6 +9152,7 @@ internal sealed class DesktopLauncherWidgetForm : Form
     protected override void OnMove(EventArgs e)
     {
         base.OnMove(e);
+        TrackActualScreenBounds();
         SnapToEdges();
         SavePlacement();
     }
@@ -8686,6 +9160,7 @@ internal sealed class DesktopLauncherWidgetForm : Form
     protected override void OnResize(EventArgs e)
     {
         base.OnResize(e);
+        TrackActualScreenBounds();
         UpdateRoundedRegion();
         SavePlacement();
     }
@@ -8778,6 +9253,7 @@ internal sealed class DesktopLauncherWidgetForm : Form
             return;
         }
 
+        TrackActualScreenBounds();
         _placementChanged(GetPlacementBounds());
     }
 
@@ -9714,7 +10190,13 @@ internal sealed class DesktopSystemMonitorWidgetForm : Form
                 NativeGlass.BeginResize(Handle, 17);
             }
         };
-        _view.CloseRequested += Close;
+        _view.CloseRequested += () =>
+        {
+            if (ConfirmationDialogs.ConfirmRemoveDesktopComponent(this))
+            {
+                Close();
+            }
+        };
         _view.ManageRequested += () => ManageRequested?.Invoke();
         _view.LockPositionChanged += SetPositionLocked;
         Controls.Add(_view);
@@ -10783,7 +11265,13 @@ internal sealed class DesktopProjectWidgetForm : Form
                 BeginManualDrag(resize: true);
             }
         };
-        _view.CloseRequested += Close;
+        _view.CloseRequested += () =>
+        {
+            if (ConfirmationDialogs.ConfirmRemoveDesktopComponent(this))
+            {
+                Close();
+            }
+        };
         _view.ManageRequested += () => ManageRequested?.Invoke();
         _view.SplitRequested += project => SplitRequested?.Invoke(project);
         _view.LockPositionChanged += SetPositionLocked;
@@ -12720,7 +13208,13 @@ internal sealed class DesktopNoteWidgetForm : Form
         _view.BeginMoveRequested += BeginManualMove;
         _view.BeginResizeRequested += BeginManualResize;
         _view.LockPositionChanged += SetPositionLocked;
-        _view.CloseRequested += Close;
+        _view.CloseRequested += () =>
+        {
+            if (ConfirmationDialogs.ConfirmRemoveDesktopComponent(this))
+            {
+                Close();
+            }
+        };
         Controls.Add(_view);
         DesktopWidgetStyle.OpacityChanged += _view.Invalidate;
         FormClosed += (_, _) => DesktopWidgetStyle.OpacityChanged -= _view.Invalidate;
@@ -14600,7 +15094,13 @@ internal sealed class DesktopOrganizerWidgetForm : Form
         };
         _view.LockPositionChanged += SetPositionLocked;
         _view.HideRequested += HideWidget;
-        _view.CloseRequested += Close;
+        _view.CloseRequested += () =>
+        {
+            if (ConfirmationDialogs.ConfirmRemoveDesktopComponent(this))
+            {
+                Close();
+            }
+        };
         Controls.Add(_view);
         DesktopWidgetStyle.OpacityChanged += ApplyWidgetSkin;
         FormClosed += (_, _) => DesktopWidgetStyle.OpacityChanged -= ApplyWidgetSkin;
@@ -17319,6 +17819,7 @@ internal sealed class DesktopOrganizerWidgetView : Control
 internal sealed class SidebarMenu : Control
 {
     private readonly List<string> _items = new();
+    private readonly HashSet<int> _badgedIndices = new();
     private int _selectedIndex = -1;
     private int _hoverIndex = -1;
 
@@ -17360,6 +17861,20 @@ internal sealed class SidebarMenu : Control
         Invalidate();
     }
 
+    public void SetBadge(int index, bool visible)
+    {
+        if (visible)
+        {
+            _badgedIndices.Add(index);
+        }
+        else
+        {
+            _badgedIndices.Remove(index);
+        }
+
+        Invalidate();
+    }
+
     protected override void OnPaint(PaintEventArgs e)
     {
         e.Graphics.SmoothingMode = SmoothingMode.AntiAlias;
@@ -17394,6 +17909,11 @@ internal sealed class SidebarMenu : Control
                 new Rectangle(row.X + 48, row.Y + 1, row.Width - 52, row.Height),
                 selected ? Color.White : ForeColor,
                 TextFormatFlags.VerticalCenter | TextFormatFlags.Left | TextFormatFlags.EndEllipsis);
+
+            if (_badgedIndices.Contains(i))
+            {
+                DrawBadge(e.Graphics, new Rectangle(row.Right - 30, row.Y + 16, 10, 10));
+            }
         }
     }
 
@@ -17444,6 +17964,14 @@ internal sealed class SidebarMenu : Control
         graphics.DrawRectangle(pen, rect.X + 7, rect.Y + 2, rect.Width - 14, 5);
         graphics.DrawLine(pen, rect.X + 7, rect.Y + 11, rect.Right - 7, rect.Y + 11);
         graphics.DrawLine(pen, rect.X + 7, rect.Y + 15, rect.Right - 7, rect.Y + 15);
+    }
+
+    private static void DrawBadge(Graphics graphics, Rectangle rect)
+    {
+        using var fill = new SolidBrush(Color.FromArgb(248, 82, 82));
+        using var border = new Pen(Color.FromArgb(245, 255, 255, 255), 1F);
+        graphics.FillEllipse(fill, rect);
+        graphics.DrawEllipse(border, rect);
     }
 }
 
@@ -17521,7 +18049,13 @@ internal sealed class DesktopClipboardWidgetForm : Form
         _view.ClipboardChanged += _clipboardChanged;
         _view.ClearRequested += ClearClipboardHistory;
         _view.RefreshRequested += RefreshClipboard;
-        _view.CloseRequested += Close;
+        _view.CloseRequested += () =>
+        {
+            if (ConfirmationDialogs.ConfirmRemoveDesktopComponent(this))
+            {
+                Close();
+            }
+        };
         _view.ManageRequested += () => manageRequested();
         Controls.Add(_view);
         _autoCollapseTimer.Tick += (_, _) =>
@@ -17691,8 +18225,7 @@ internal sealed class DesktopClipboardWidgetForm : Form
             return;
         }
 
-        var result = MessageBox.Show(this, "确定清除全部剪贴板历史吗？", "DustDesk", MessageBoxButtons.YesNo, MessageBoxIcon.Question);
-        if (result != DialogResult.Yes)
+        if (!ConfirmationDialogs.ConfirmDangerousActionTwice(this, "清空剪贴板历史", "清空", "全部未锁定剪贴板历史"))
         {
             return;
         }
@@ -18590,6 +19123,11 @@ internal sealed class DesktopClipboardWidgetView : Control
             return;
         }
 
+        if (!ConfirmationDialogs.ConfirmDeleteTwice((IWin32Window?)FindForm() ?? this, "这条剪贴板历史"))
+        {
+            return;
+        }
+
         var deleted = _selectedItem;
         if (!_clipboard.Items.Remove(deleted))
         {
@@ -19410,7 +19948,13 @@ internal sealed class DesktopSearchWidgetForm : Form
         _menu.Items.Add(layoutMenu);
         var componentMenu = new ToolStripMenuItem("组件管理");
         SetMenuIcon(componentMenu, "zicaidan", "3.png");
-        var removeMenuItem = componentMenu.DropDownItems.Add("移除组件", null, (_, _) => Close());
+        var removeMenuItem = componentMenu.DropDownItems.Add("移除组件", null, (_, _) =>
+        {
+            if (ConfirmationDialogs.ConfirmRemoveDesktopComponent(this))
+            {
+                Close();
+            }
+        });
         SetMenuIcon(removeMenuItem, "zicaidan", "3-2.png");
         _menu.Items.Add(componentMenu);
         var appearanceMenu = new ToolStripMenuItem("外观设置");
@@ -20212,6 +20756,8 @@ internal sealed class SettingsPageCanvas : Control
     private readonly AppConfig _config;
     private readonly Func<bool> _autoStartProvider;
     private readonly Func<bool> _noteVisibleProvider;
+    private readonly Func<UpdateInfo?> _updateProvider;
+    private readonly Func<bool> _updateCheckProvider;
     private readonly TextBox _mainHotKeyBox = CreateHotKeyBox();
     private readonly TextBox _desktopHotKeyBox = CreateHotKeyBox();
     private readonly List<(Rectangle Rect, string Key)> _hotspots = new();
@@ -20220,6 +20766,8 @@ internal sealed class SettingsPageCanvas : Control
     private bool _showVersionInfo;
     private int _versionScrollOffset;
     private int _versionContentHeight;
+    private int _settingsScrollOffset;
+    private int _settingsContentHeight;
 
     private static readonly Color Back = Color.FromArgb(22, 30, 42);
     private static readonly Color CardFill = Color.FromArgb(118, 30, 40, 56);
@@ -20231,13 +20779,16 @@ internal sealed class SettingsPageCanvas : Control
     private static readonly Font SectionFont = new("Microsoft YaHei UI", 11.5F, FontStyle.Regular);
     private static readonly Font NormalFont = new("Microsoft YaHei UI", 9.5F, FontStyle.Regular);
     private static readonly Font ButtonFont = new("Microsoft YaHei UI", 9F, FontStyle.Regular);
+    private const TextFormatFlags PreserveTextClip = TextFormatFlags.PreserveGraphicsClipping;
 
-    public SettingsPageCanvas(AppConfig config, string dataDirectory, Func<bool> autoStartProvider, Func<bool> noteVisibleProvider)
+    public SettingsPageCanvas(AppConfig config, string dataDirectory, Func<bool> autoStartProvider, Func<bool> noteVisibleProvider, Func<UpdateInfo?> updateProvider, Func<bool> updateCheckProvider)
     {
         _config = config;
         _dataDirectory = dataDirectory;
         _autoStartProvider = autoStartProvider;
         _noteVisibleProvider = noteVisibleProvider;
+        _updateProvider = updateProvider;
+        _updateCheckProvider = updateCheckProvider;
         Controls.Add(_mainHotKeyBox);
         Controls.Add(_desktopHotKeyBox);
         SetStyle(ControlStyles.AllPaintingInWmPaint | ControlStyles.UserPaint | ControlStyles.OptimizedDoubleBuffer | ControlStyles.ResizeRedraw | ControlStyles.SupportsTransparentBackColor, true);
@@ -20252,6 +20803,8 @@ internal sealed class SettingsPageCanvas : Control
     public event Action? ChooseDataPathRequested;
     public event Action? RestoreDesktopRequested;
     public event Action? ExportProjectsRequested;
+    public event Action? BackupRequested;
+    public event Action? RestoreBackupRequested;
     public event Action? CheckVersionRequested;
     public event Action? IntroRequested;
     public event Action? AboutRequested;
@@ -20276,7 +20829,7 @@ internal sealed class SettingsPageCanvas : Control
         }
 
         TextRenderer.DrawText(g, _showVersionInfo ? "版本信息" : "设置中心", HeaderFont, new Rectangle(0, 0, Width, 70), TextMain, TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis);
-        var contentRect = new Rectangle(0, 112, Math.Max(1, Width - 10), Math.Max(1, Height - 118));
+        var contentRect = GetPageRect();
         if (_showVersionInfo)
         {
             DrawVersionInfo(g, contentRect);
@@ -20288,12 +20841,34 @@ internal sealed class SettingsPageCanvas : Control
         PositionInputs();
     }
 
+    private Rectangle GetPageRect() => new(0, 112, Math.Max(1, Width - 10), Math.Max(1, Height - 118));
+
+    private static Rectangle GetSettingsContentRect(Rectangle rect) => new(rect.X + 28, rect.Y + 20, Math.Max(1, rect.Width - 56), Math.Max(1, rect.Height - 40));
+
+    private string? HitTestHotspot(Point location)
+    {
+        var pageRect = GetPageRect();
+        var hitRect = _showVersionInfo ? pageRect : GetSettingsContentRect(pageRect);
+        if (!hitRect.Contains(location))
+        {
+            return null;
+        }
+
+        return _hotspots.FirstOrDefault(item => item.Rect.Contains(location) && hitRect.IntersectsWith(item.Rect)).Key;
+    }
+
     private void DrawSettings(Graphics g, Rectangle rect)
     {
         DrawRoundRect(g, rect, CardFill, CardBorder, 10);
-        var x = rect.X + 28;
-        var y = rect.Y + 20;
-        TextRenderer.DrawText(g, "基础设置", SectionFont, new Rectangle(x, y, rect.Width - 56, 30), TextMain, TextFormatFlags.Left | TextFormatFlags.VerticalCenter);
+        var content = GetSettingsContentRect(rect);
+        _settingsScrollOffset = Math.Clamp(_settingsScrollOffset, 0, Math.Max(0, _settingsContentHeight - content.Height));
+        var state = g.Save();
+        try
+        {
+            g.SetClip(content);
+            var x = content.X;
+            var y = content.Y - _settingsScrollOffset;
+        TextRenderer.DrawText(g, "基础设置", SectionFont, new Rectangle(x, y, rect.Width - 56, 30), TextMain, TextFormatFlags.Left | TextFormatFlags.VerticalCenter | PreserveTextClip);
         y += 40;
         DrawToggleLine(g, x, y, "autoStart", "开机自动启动", _autoStartProvider());
         y += 46;
@@ -20315,11 +20890,23 @@ internal sealed class SettingsPageCanvas : Control
         y += 52;
         DrawActionLine(g, x, y, "导出项目管理", "export", "导出 Excel", "导出 xlsx 表格，项目、事项、子任务路径会写入超链接", false);
         y += 52;
+        DrawActionLine(g, x, y, "备份数据", "backup", "备份", "备份布局、桌面收纳内容、图标文件和全部记录", false);
+        y += 52;
+        DrawActionLine(g, x, y, "恢复备份", "restoreBackup", "恢复", "从备份文件恢复布局、收纳内容、图标文件和记录", true);
+        y += 52;
         DrawActionLine(g, x, y, "操作简介", "intro", "查看", "查看常用操作和快捷入口", false);
         y += 50;
         DrawActionLine(g, x, y, "关于我的", "about", "关注抖音", "反馈问题和咨询", false);
         y += 50;
         DrawActionLine(g, x, y, "重置所有数据", "reset", "重置", "清空所有应用数据，收纳内容会先恢复到桌面", true);
+            var bottom = y + 50;
+            _settingsContentHeight = Math.Max(0, bottom - (content.Y - _settingsScrollOffset));
+            _settingsScrollOffset = Math.Clamp(_settingsScrollOffset, 0, Math.Max(0, _settingsContentHeight - content.Height));
+        }
+        finally
+        {
+            g.Restore(state);
+        }
     }
 
     private void DrawVersionInfo(Graphics g, Rectangle rect)
@@ -20328,12 +20915,20 @@ internal sealed class SettingsPageCanvas : Control
         var back = new Rectangle(rect.X + 28, rect.Y + 20, 90, 32);
         DrawButton(g, back, "返回", true, _hoverKey == "versionBack", false);
         _hotspots.Add((back, "versionBack"));
-        TextRenderer.DrawText(g, $"当前版本 v{UpdateChecker.CurrentVersionText}", SectionFont, new Rectangle(back.Right + 18, rect.Y + 20, rect.Width - 150, 32), TextMain, TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis);
+        TextRenderer.DrawText(g, $"当前版本 v{UpdateChecker.CurrentVersionText}", SectionFont, new Rectangle(back.Right + 18, rect.Y + 20, rect.Width - 150, 32), TextMain, TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis | PreserveTextClip);
 
         var content = new Rectangle(rect.X + 28, rect.Y + 68, rect.Width - 56, rect.Height - 92);
         _versionScrollOffset = Math.Max(0, _versionScrollOffset);
         var y = content.Y - _versionScrollOffset;
 
+        DrawVersionSection(g, content, "1.6.0 更新记录", new[]
+        {
+            "所有删除和高风险清空操作增加二次确认，桌面收纳拖入拖出仍保持原来的直接移动逻辑。",
+            "设置中心新增数据备份和恢复，覆盖布局、桌面收纳内容、图标文件和记录。",
+            "有新版本时设置入口显示角标，检测版本按钮显示为有新版本；更新弹窗只在用户点击后出现。",
+            "修复部分快捷方式和 URL 图标不显示的问题，增强图标路径、目标程序和 Shell 图标回退加载。",
+            "修复快捷启动桌面组件拖动后回到旧位置的问题，并修正设置中心内容过多时的滚动和裁剪显示。"
+        }, content.X, ref y, content.Width);
         DrawVersionSection(g, content, "1.5.1 修复记录", new[]
         {
             "修复桌面收纳拆分后重新打开又自动合并的问题。拆分组件现在会保存分类、位置、大小、折叠状态和展开尺寸。",
@@ -20398,7 +20993,7 @@ internal sealed class SettingsPageCanvas : Control
         var titleRect = new Rectangle(x, y, width, 30);
         if (titleRect.Top >= view.Top && titleRect.Top < view.Bottom)
         {
-            TextRenderer.DrawText(g, title, SectionFont, titleRect, TextMain, TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis);
+            TextRenderer.DrawText(g, title, SectionFont, titleRect, TextMain, TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis | PreserveTextClip);
         }
 
         y += 34;
@@ -20409,7 +21004,7 @@ internal sealed class SettingsPageCanvas : Control
             var lineRect = new Rectangle(x + 8, y, width - 8, lineHeight);
             if (lineRect.Top >= view.Top && lineRect.Top < view.Bottom)
             {
-                TextRenderer.DrawText(g, text, NormalFont, lineRect, TextSubtle, TextFormatFlags.Left | TextFormatFlags.Top | TextFormatFlags.WordBreak);
+                TextRenderer.DrawText(g, text, NormalFont, lineRect, TextSubtle, TextFormatFlags.Left | TextFormatFlags.Top | TextFormatFlags.WordBreak | PreserveTextClip);
             }
 
             y += lineHeight;
@@ -20420,15 +21015,15 @@ internal sealed class SettingsPageCanvas : Control
 
     private void DrawToggleLine(Graphics g, int x, int y, string key, string title, bool enabled)
     {
-        TextRenderer.DrawText(g, title, NormalFont, new Rectangle(x, y, 172, 34), TextMain, TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis);
+        TextRenderer.DrawText(g, title, NormalFont, new Rectangle(x, y, 172, 34), TextMain, TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis | PreserveTextClip);
         DrawCheckBox(g, new Rectangle(x + 176, y + 7, 22, 22), enabled);
         _hotspots.Add((new Rectangle(x + 168, y, 112, 34), key));
-        TextRenderer.DrawText(g, enabled ? "已开启" : "已关闭", NormalFont, new Rectangle(x + 206, y, 88, 34), TextMain, TextFormatFlags.Left | TextFormatFlags.VerticalCenter);
+        TextRenderer.DrawText(g, enabled ? "已开启" : "已关闭", NormalFont, new Rectangle(x + 206, y, 88, 34), TextMain, TextFormatFlags.Left | TextFormatFlags.VerticalCenter | PreserveTextClip);
     }
 
     private void DrawWidgetLine(Graphics g, int x, int y, int width)
     {
-        TextRenderer.DrawText(g, "桌面组件显示", NormalFont, new Rectangle(x, y, 160, 34), TextMain, TextFormatFlags.Left | TextFormatFlags.VerticalCenter);
+        TextRenderer.DrawText(g, "桌面组件显示", NormalFont, new Rectangle(x, y, 160, 34), TextMain, TextFormatFlags.Left | TextFormatFlags.VerticalCenter | PreserveTextClip);
         var widgets = new (string Key, string Text, bool Visible)[]
         {
             ("widget_search", "搜索", _config.DesktopSearchWidget?.Visible == true),
@@ -20445,11 +21040,11 @@ internal sealed class SettingsPageCanvas : Control
 
     private void DrawHotKeyLine(Graphics g, int x, int y, string title, string saveKey, bool withTargets)
     {
-        TextRenderer.DrawText(g, title, NormalFont, new Rectangle(x, y, 160, 34), TextMain, TextFormatFlags.Left | TextFormatFlags.VerticalCenter);
+        TextRenderer.DrawText(g, title, NormalFont, new Rectangle(x, y, 160, 34), TextMain, TextFormatFlags.Left | TextFormatFlags.VerticalCenter | PreserveTextClip);
         var save = new Rectangle(x + 370, y + 1, 82, 32);
         DrawButton(g, save, "保存", true, _hoverKey == saveKey, false);
         _hotspots.Add((save, saveKey));
-        TextRenderer.DrawText(g, "格式示例：Ctrl+Shift+K、Ctrl+Alt+Space", NormalFont, new Rectangle(x + 470, y, 430, 34), TextSubtle, TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis);
+        TextRenderer.DrawText(g, "格式示例：Ctrl+Shift+K、Ctrl+Alt+Space", NormalFont, new Rectangle(x + 470, y, 430, 34), TextSubtle, TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis | PreserveTextClip);
         if (!withTargets)
         {
             return;
@@ -20471,9 +21066,9 @@ internal sealed class SettingsPageCanvas : Control
 
     private void DrawDataPathLine(Graphics g, int x, int y, int width)
     {
-        TextRenderer.DrawText(g, "文件保存路径", NormalFont, new Rectangle(x, y, 160, 34), TextMain, TextFormatFlags.Left | TextFormatFlags.VerticalCenter);
-        TextRenderer.DrawText(g, _dataDirectory, NormalFont, new Rectangle(x + 176, y, Math.Max(1, width - 330), 24), TextSubtle, TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis);
-        TextRenderer.DrawText(g, "换新版本后，可点“选择”找到之前的数据文件夹并读取。", NormalFont, new Rectangle(x + 176, y + 24, Math.Max(1, width - 330), 22), Color.FromArgb(136, 154, 178), TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis);
+        TextRenderer.DrawText(g, "文件保存路径", NormalFont, new Rectangle(x, y, 160, 34), TextMain, TextFormatFlags.Left | TextFormatFlags.VerticalCenter | PreserveTextClip);
+        TextRenderer.DrawText(g, _dataDirectory, NormalFont, new Rectangle(x + 176, y, Math.Max(1, width - 330), 24), TextSubtle, TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis | PreserveTextClip);
+        TextRenderer.DrawText(g, "换新版本后，可点“选择”找到之前的数据文件夹并读取。", NormalFont, new Rectangle(x + 176, y + 24, Math.Max(1, width - 330), 22), Color.FromArgb(136, 154, 178), TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis | PreserveTextClip);
         var choose = new Rectangle(x + Math.Max(760, width - 110), y + 8, 82, 32);
         DrawButton(g, choose, "选择", true, _hoverKey == "choosePath", false);
         _hotspots.Add((choose, "choosePath"));
@@ -20481,11 +21076,34 @@ internal sealed class SettingsPageCanvas : Control
 
     private void DrawActionLine(Graphics g, int x, int y, string title, string key, string buttonText, string hint, bool danger)
     {
-        TextRenderer.DrawText(g, title, NormalFont, new Rectangle(x, y, 160, 34), TextMain, TextFormatFlags.Left | TextFormatFlags.VerticalCenter);
+        if (string.Equals(key, "checkVersion", StringComparison.Ordinal))
+        {
+            var update = _updateProvider();
+            if (update is not null)
+            {
+                title = "有新版本";
+                buttonText = "有新版本";
+                hint = $"发现新版本 v{update.VersionText}，点击查看更新";
+            }
+            else if (_updateCheckProvider())
+            {
+                title = "检测版本";
+                buttonText = "检测中";
+                hint = "正在检测是否有新版本";
+            }
+            else
+            {
+                title = "检测版本";
+                buttonText = "检测";
+                hint = $"当前版本 v{UpdateChecker.CurrentVersionText}，点击后检测是否有新版本";
+            }
+        }
+
+        TextRenderer.DrawText(g, title, NormalFont, new Rectangle(x, y, 160, 34), TextMain, TextFormatFlags.Left | TextFormatFlags.VerticalCenter | PreserveTextClip);
         var button = new Rectangle(x + 176, y + 1, 120, 32);
         DrawButton(g, button, buttonText, true, _hoverKey == key, danger);
         _hotspots.Add((button, key));
-        TextRenderer.DrawText(g, hint, NormalFont, new Rectangle(x + 320, y, Math.Max(1, Width - x - 350), 34), TextSubtle, TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis);
+        TextRenderer.DrawText(g, hint, NormalFont, new Rectangle(x + 320, y, Math.Max(1, Width - x - 350), 34), TextSubtle, TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis | PreserveTextClip);
     }
 
     private void DrawInlineToggles(Graphics g, int x, int y, int width, (string Key, string Text, bool Visible)[] items)
@@ -20504,26 +21122,31 @@ internal sealed class SettingsPageCanvas : Control
             DrawCheckBox(g, new Rectangle(currentX, currentY + 7, 22, 22), item.Visible);
             var rect = new Rectangle(currentX, currentY, itemWidth, 34);
             _hotspots.Add((rect, item.Key));
-            TextRenderer.DrawText(g, item.Text + (item.Visible ? "：显示" : "：关闭"), NormalFont, new Rectangle(currentX + 30, currentY, itemWidth - 30, 34), TextMain, TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis);
+            TextRenderer.DrawText(g, item.Text + (item.Visible ? "：显示" : "：关闭"), NormalFont, new Rectangle(currentX + 30, currentY, itemWidth - 30, 34), TextMain, TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis | PreserveTextClip);
             currentX += itemWidth + 16;
         }
     }
 
     private void PositionInputs()
     {
-        _mainHotKeyBox.Visible = !_showVersionInfo;
-        _desktopHotKeyBox.Visible = !_showVersionInfo;
         if (_showVersionInfo)
         {
+            _mainHotKeyBox.Visible = false;
+            _desktopHotKeyBox.Visible = false;
             return;
         }
 
-        var area = new Rectangle(0, 112, Math.Max(1, Width - 10), Math.Max(1, Height - 138));
+        var area = GetPageRect();
+        var visibleArea = Rectangle.Inflate(GetSettingsContentRect(area), -1, -1);
         var x = area.X + 28;
-        var y = area.Y + 20 + 40 + 46 + 46 + 82;
-        _mainHotKeyBox.SetBounds(x + 176, y + 4, 180, 28);
+        var y = area.Y + 20 - _settingsScrollOffset + 40 + 46 + 46 + 82;
+        var mainBounds = new Rectangle(x + 176, y + 4, 180, 28);
+        _mainHotKeyBox.SetBounds(mainBounds.X, mainBounds.Y, mainBounds.Width, mainBounds.Height);
+        _mainHotKeyBox.Visible = visibleArea.Contains(mainBounds);
         y += 56;
-        _desktopHotKeyBox.SetBounds(x + 176, y + 4, 180, 28);
+        var desktopBounds = new Rectangle(x + 176, y + 4, 180, 28);
+        _desktopHotKeyBox.SetBounds(desktopBounds.X, desktopBounds.Y, desktopBounds.Width, desktopBounds.Height);
+        _desktopHotKeyBox.Visible = visibleArea.Contains(desktopBounds);
     }
 
     protected override void OnMouseWheel(MouseEventArgs e)
@@ -20536,12 +21159,14 @@ internal sealed class SettingsPageCanvas : Control
             return;
         }
 
-        base.OnMouseWheel(e);
+        var content = GetSettingsContentRect(GetPageRect());
+        _settingsScrollOffset = Math.Clamp(_settingsScrollOffset - e.Delta / 4, 0, Math.Max(0, _settingsContentHeight - content.Height));
+        Invalidate();
     }
 
     protected override void OnMouseMove(MouseEventArgs e)
     {
-        var key = _hotspots.FirstOrDefault(item => item.Rect.Contains(e.Location)).Key;
+        var key = HitTestHotspot(e.Location);
         if (_hoverKey != key)
         {
             _hoverKey = key;
@@ -20567,7 +21192,7 @@ internal sealed class SettingsPageCanvas : Control
             return;
         }
 
-        var key = _hotspots.FirstOrDefault(item => item.Rect.Contains(e.Location)).Key;
+        var key = HitTestHotspot(e.Location);
         switch (key)
         {
             case "autoStart": AutoStartChanged?.Invoke(!_autoStartProvider()); break;
@@ -20580,6 +21205,8 @@ internal sealed class SettingsPageCanvas : Control
             case "versionBack": _showVersionInfo = false; Invalidate(); break;
             case "restore": RestoreDesktopRequested?.Invoke(); break;
             case "export": ExportProjectsRequested?.Invoke(); break;
+            case "backup": BackupRequested?.Invoke(); break;
+            case "restoreBackup": RestoreBackupRequested?.Invoke(); break;
             case "intro": IntroRequested?.Invoke(); break;
             case "about": AboutRequested?.Invoke(); break;
             case "reset": ResetRequested?.Invoke(); break;
@@ -20639,7 +21266,7 @@ internal sealed class SettingsPageCanvas : Control
         var border = enabled ? fill : Color.FromArgb(84, 102, 126);
         var textColor = enabled ? Color.White : Color.FromArgb(112, 126, 146);
         DrawRoundRect(g, rect, fill, border, 6);
-        TextRenderer.DrawText(g, text, ButtonFont, rect, textColor, TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis);
+        TextRenderer.DrawText(g, text, ButtonFont, rect, textColor, TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis | PreserveTextClip);
     }
 
     private static void DrawCheckBox(Graphics g, Rectangle rect, bool isChecked)
@@ -24923,6 +25550,7 @@ internal static class ShellIconLoader
     private const uint ShgfiIcon = 0x000000100;
     private const uint ShgfiLargeIcon = 0x000000000;
     private const uint ShgfiSysIconIndex = 0x000004000;
+    private const uint ShgfiPidl = 0x000000008;
     private const int ShilLarge = 0x0;
     private const int ShilExtraLarge = 0x2;
     private const int ShilJumbo = 0x4;
@@ -24932,10 +25560,33 @@ internal static class ShellIconLoader
 
     public static Image? LoadLargeIcon(string path)
     {
-        if (string.Equals(Path.GetExtension(path), ".lnk", StringComparison.OrdinalIgnoreCase)
-            && TryLoadShortcutTargetIcon(path, out var shortcutIcon))
+        if (string.IsNullOrWhiteSpace(path))
         {
-            return shortcutIcon;
+            return null;
+        }
+
+        var extension = Path.GetExtension(path);
+        if (string.Equals(extension, ".lnk", StringComparison.OrdinalIgnoreCase))
+        {
+            if (TryLoadShortcutIcon(path, out var shortcutIcon))
+            {
+                return shortcutIcon;
+            }
+
+            var linkIcon = LoadShellIcon(path);
+            if (linkIcon is not null && IsProbablyBlankGenericIcon(linkIcon))
+            {
+                linkIcon.Dispose();
+                return null;
+            }
+
+            return linkIcon;
+        }
+
+        if (string.Equals(extension, ".url", StringComparison.OrdinalIgnoreCase)
+            && TryLoadInternetShortcutIcon(path, out var urlIcon))
+        {
+            return urlIcon;
         }
 
         return LoadShellIcon(path);
@@ -25055,10 +25706,11 @@ internal static class ShellIconLoader
         }
     }
 
-    private static bool TryLoadShortcutTargetIcon(string shortcutPath, out Image? image)
+    private static bool TryLoadShortcutIcon(string shortcutPath, out Image? image)
     {
         image = null;
         object? shellLinkObject = null;
+        IntPtr idList = IntPtr.Zero;
         try
         {
             shellLinkObject = new ShellLink();
@@ -25066,24 +25718,42 @@ internal static class ShellIconLoader
             persistFile.Load(shortcutPath, 0);
             var shellLink = (IShellLinkW)shellLinkObject;
 
+            var targetPath = new StringBuilder(MaxPath);
+            shellLink.GetPath(targetPath, targetPath.Capacity, IntPtr.Zero, 0);
+            var target = Environment.ExpandEnvironmentVariables(targetPath.ToString());
+            var targetDirectory = !string.IsNullOrWhiteSpace(target) ? Path.GetDirectoryName(target) : null;
+
+            var workingDirectory = new StringBuilder(MaxPath);
+            shellLink.GetWorkingDirectory(workingDirectory, workingDirectory.Capacity);
+            var working = Environment.ExpandEnvironmentVariables(workingDirectory.ToString());
+
             var iconPath = new StringBuilder(MaxPath);
             shellLink.GetIconLocation(iconPath, iconPath.Capacity, out var iconIndex);
-            var configuredIcon = Environment.ExpandEnvironmentVariables(iconPath.ToString());
-            if (!string.IsNullOrWhiteSpace(configuredIcon) && File.Exists(configuredIcon))
+            foreach (var configuredIcon in ResolveIconPathCandidates(iconPath.ToString(), shortcutPath, working, targetDirectory))
             {
                 image = ExtractIconBitmap(configuredIcon, iconIndex, PreferredIconSize);
                 if (image is not null)
                 {
                     return true;
                 }
+
+                image = LoadShellIcon(configuredIcon);
+                if (image is not null)
+                {
+                    return true;
+                }
             }
 
-            var targetPath = new StringBuilder(MaxPath);
-            shellLink.GetPath(targetPath, targetPath.Capacity, IntPtr.Zero, 0);
-            var target = Environment.ExpandEnvironmentVariables(targetPath.ToString());
             if (!string.IsNullOrWhiteSpace(target) && (File.Exists(target) || Directory.Exists(target)))
             {
                 image = ExtractIconBitmap(target, 0, PreferredIconSize) ?? LoadShellIcon(target);
+                return image is not null;
+            }
+
+            shellLink.GetIDList(out idList);
+            if (idList != IntPtr.Zero)
+            {
+                image = LoadShellIconFromPidl(idList);
                 return image is not null;
             }
         }
@@ -25092,6 +25762,11 @@ internal static class ShellIconLoader
         }
         finally
         {
+            if (idList != IntPtr.Zero)
+            {
+                Marshal.FreeCoTaskMem(idList);
+            }
+
             if (shellLinkObject is not null)
             {
                 Marshal.FinalReleaseComObject(shellLinkObject);
@@ -25099,6 +25774,208 @@ internal static class ShellIconLoader
         }
 
         return false;
+    }
+
+    private static bool TryLoadInternetShortcutIcon(string shortcutPath, out Image? image)
+    {
+        image = null;
+        if (!File.Exists(shortcutPath))
+        {
+            return false;
+        }
+
+        try
+        {
+            string? iconFile = null;
+            var iconIndex = 0;
+            foreach (var line in File.ReadLines(shortcutPath))
+            {
+                var separator = line.IndexOf('=');
+                if (separator <= 0)
+                {
+                    continue;
+                }
+
+                var key = line[..separator].Trim();
+                var value = line[(separator + 1)..].Trim();
+                if (key.Equals("IconFile", StringComparison.OrdinalIgnoreCase))
+                {
+                    iconFile = value;
+                }
+                else if (key.Equals("IconIndex", StringComparison.OrdinalIgnoreCase)
+                    && int.TryParse(value, NumberStyles.Integer, CultureInfo.InvariantCulture, out var parsedIndex))
+                {
+                    iconIndex = parsedIndex;
+                }
+            }
+
+            foreach (var candidate in ResolveIconPathCandidates(iconFile, shortcutPath, null, null))
+            {
+                image = ExtractIconBitmap(candidate, iconIndex, PreferredIconSize) ?? LoadShellIcon(candidate);
+                if (image is not null)
+                {
+                    return true;
+                }
+            }
+        }
+        catch
+        {
+        }
+
+        return false;
+    }
+
+    private static IEnumerable<string> ResolveIconPathCandidates(string? iconPath, string ownerPath, string? workingDirectory, string? targetDirectory)
+    {
+        iconPath = CleanIconPath(iconPath);
+        if (string.IsNullOrWhiteSpace(iconPath))
+        {
+            yield break;
+        }
+
+        var expanded = Environment.ExpandEnvironmentVariables(iconPath);
+        var baseDirectories = new[]
+        {
+            Path.GetDirectoryName(ownerPath),
+            workingDirectory,
+            targetDirectory,
+            AppContext.BaseDirectory
+        };
+
+        foreach (var candidate in ExpandPathCandidates(expanded, baseDirectories))
+        {
+            if (File.Exists(candidate) || Directory.Exists(candidate))
+            {
+                yield return candidate;
+            }
+        }
+    }
+
+    private static IEnumerable<string> ExpandPathCandidates(string path, IEnumerable<string?> baseDirectories)
+    {
+        if (Path.IsPathRooted(path))
+        {
+            yield return path;
+            yield break;
+        }
+
+        foreach (var directory in baseDirectories.Where(directory => !string.IsNullOrWhiteSpace(directory)).Distinct(StringComparer.OrdinalIgnoreCase))
+        {
+            string candidate;
+            try
+            {
+                candidate = Path.GetFullPath(Path.Combine(directory!, path));
+            }
+            catch
+            {
+                continue;
+            }
+
+            yield return candidate;
+        }
+    }
+
+    private static string CleanIconPath(string? iconPath)
+    {
+        if (string.IsNullOrWhiteSpace(iconPath))
+        {
+            return string.Empty;
+        }
+
+        var cleaned = iconPath.Trim().Trim('"');
+        if (cleaned.StartsWith('@'))
+        {
+            cleaned = cleaned[1..].Trim().Trim('"');
+        }
+
+        var comma = cleaned.LastIndexOf(',');
+        if (comma > 1 && int.TryParse(cleaned[(comma + 1)..], NumberStyles.Integer, CultureInfo.InvariantCulture, out _))
+        {
+            cleaned = cleaned[..comma].Trim().Trim('"');
+        }
+
+        return cleaned;
+    }
+
+    private static Image? LoadShellIconFromPidl(IntPtr idList)
+    {
+        try
+        {
+            var result = SHGetFileInfo(
+                idList,
+                0,
+                out var fileInfo,
+                (uint)Marshal.SizeOf<SHFILEINFO>(),
+                ShgfiPidl | ShgfiSysIconIndex);
+
+            if (result != IntPtr.Zero && fileInfo.iIcon >= 0)
+            {
+                foreach (var imageListSize in new[] { ShilJumbo, ShilExtraLarge, ShilLarge })
+                {
+                    var image = LoadImageListIcon(fileInfo.iIcon, imageListSize);
+                    if (image is not null)
+                    {
+                        return image;
+                    }
+                }
+            }
+
+            result = SHGetFileInfo(
+                idList,
+                0,
+                out fileInfo,
+                (uint)Marshal.SizeOf<SHFILEINFO>(),
+                ShgfiPidl | ShgfiIcon | ShgfiLargeIcon);
+
+            if (result == IntPtr.Zero || fileInfo.hIcon == IntPtr.Zero)
+            {
+                return null;
+            }
+
+            try
+            {
+                using var icon = (Icon)Icon.FromHandle(fileInfo.hIcon).Clone();
+                return icon.ToBitmap();
+            }
+            finally
+            {
+                DestroyIcon(fileInfo.hIcon);
+            }
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
+    private static bool IsProbablyBlankGenericIcon(Image image)
+    {
+        try
+        {
+            using var bitmap = new Bitmap(image);
+            var samples = 0;
+            var lowInformation = 0;
+            var stepX = Math.Max(1, bitmap.Width / 16);
+            var stepY = Math.Max(1, bitmap.Height / 16);
+            for (var y = 0; y < bitmap.Height; y += stepY)
+            {
+                for (var x = 0; x < bitmap.Width; x += stepX)
+                {
+                    var pixel = bitmap.GetPixel(x, y);
+                    samples++;
+                    if (pixel.A < 24 || (pixel.GetBrightness() > 0.92F && pixel.GetSaturation() < 0.12F))
+                    {
+                        lowInformation++;
+                    }
+                }
+            }
+
+            return samples > 0 && lowInformation >= samples * 0.88F;
+        }
+        catch
+        {
+            return false;
+        }
     }
 
     private static Image? ExtractIconBitmap(string path, int iconIndex, int size)
@@ -25132,6 +26009,14 @@ internal static class ShellIconLoader
     [DllImport("shell32.dll", CharSet = CharSet.Unicode)]
     private static extern IntPtr SHGetFileInfo(
         string pszPath,
+        uint dwFileAttributes,
+        out SHFILEINFO psfi,
+        uint cbFileInfo,
+        uint uFlags);
+
+    [DllImport("shell32.dll", CharSet = CharSet.Unicode)]
+    private static extern IntPtr SHGetFileInfo(
+        IntPtr pszPath,
         uint dwFileAttributes,
         out SHFILEINFO psfi,
         uint cbFileInfo,
