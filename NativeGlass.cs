@@ -249,7 +249,18 @@ internal static class NativeGlass
         SHChangeNotify(directory ? ShcneMkdir : ShcneCreate, flags, target, null);
         NotifyShellDirectory(Path.GetDirectoryName(source));
         NotifyShellDirectory(Path.GetDirectoryName(target));
+        RefreshDesktopHost();
+    }
 
+    public static void NotifyShellDeleted(string path, bool directory)
+    {
+        SHChangeNotify(directory ? ShcneRmdir : ShcneDelete, ShcnfPathW | ShcnfFlushNowait, path, null);
+        NotifyShellDirectory(Path.GetDirectoryName(path));
+        RefreshDesktopHost();
+    }
+
+    private static void RefreshDesktopHost()
+    {
         var host = FindDesktopHost();
         if (host != IntPtr.Zero)
         {

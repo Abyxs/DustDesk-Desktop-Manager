@@ -137,7 +137,10 @@ public sealed class MainForm : Form
         _config = _store.LoadConfig();
         DesktopWidgetStyle.OpacityPercent = _config.DesktopWidgetOpacity;
         DesktopWidgetStyle.OpacityChanged += HandleDesktopWidgetOpacityChanged;
-        if (EnsureDesktopWidgetsTransparent())
+        var configChanged = EnsureDesktopWidgetsTransparent();
+        configChanged |= DesktopOrganizerStorage.EnsureOrganizerFileSystemReferences(_config, _store);
+        _ = DesktopOrganizerStorage.RemoveDesktopDuplicateOrganizerReferences(_config);
+        if (configChanged)
         {
             _store.SaveConfig(_config);
         }
@@ -1158,8 +1161,8 @@ public sealed class MainForm : Form
             }
 
             _config.MainWindowDisplayName = name.Trim();
-            _store.SaveConfig(_config);
-            dashboard.Invalidate();
+            SaveAllData();
+            ShowPage(0);
         };
         _content.Controls.Add(dashboard);
     }
@@ -3743,6 +3746,7 @@ public sealed class MainForm : Form
 
         void RefreshAll()
         {
+            DesktopOrganizerStorage.EnsureOrganizerFileSystemReferences(_config, _store);
             RemoveMissingDesktopCategoryItems();
             DesktopOrganizerStorage.RemoveDesktopDuplicateOrganizerReferences(_config);
             _store.SaveConfig(_config);
@@ -5531,7 +5535,7 @@ public sealed class MainForm : Form
                 return;
             }
 
-            var selectedPath = Path.GetFullPath(dialog.SelectedPath);
+            var selectedPath = _store.ResolveDataDirectory(dialog.SelectedPath);
             var hasExistingData = _store.HasDataDirectory(selectedPath)
                 && !string.Equals(selectedPath, _store.DataDirectory, StringComparison.OrdinalIgnoreCase);
             if (hasExistingData)
@@ -5735,7 +5739,7 @@ public sealed class MainForm : Form
                 return;
             }
 
-            var selectedPath = Path.GetFullPath(dialog.SelectedPath);
+            var selectedPath = _store.ResolveDataDirectory(dialog.SelectedPath);
             var hasExistingData = _store.HasDataDirectory(selectedPath)
                 && !string.Equals(selectedPath, _store.DataDirectory, StringComparison.OrdinalIgnoreCase);
             if (hasExistingData)
@@ -14161,26 +14165,77 @@ internal static class DesktopOrganizerStorage
         return target;
     }
 
-    public static bool RemoveDesktopDuplicateOrganizerReferences(AppConfig config)
+    public static bool EnsureOrganizerFileSystemReferences(AppConfig config, AppStore store)
     {
-        var desktopNames = GetDesktopEntryNames();
-        if (desktopNames.Count == 0)
+        var root = Path.Combine(store.DataDirectory, "DesktopOrganizer");
+        if (!Directory.Exists(root))
         {
             return false;
         }
 
-        var removed = false;
-        foreach (var category in config.DesktopCategories)
+        var changed = false;
+        var existingPaths = config.DesktopCategories
+            .SelectMany(category => category.ItemPaths)
+            .Select(NormalizePath)
+            .ToHashSet(StringComparer.OrdinalIgnoreCase);
+
+        foreach (var categoryDirectory in Directory.EnumerateDirectories(root))
         {
-            var count = category.ItemPaths.RemoveAll(path =>
+            var categoryName = Path.GetFileName(categoryDirectory);
+            if (string.IsNullOrWhiteSpace(categoryName))
             {
-                var name = Path.GetFileName(path);
-                return !string.IsNullOrWhiteSpace(name) && desktopNames.Contains(name);
-            });
-            removed |= count > 0;
+                continue;
+            }
+
+            var category = config.DesktopCategories.FirstOrDefault(item => string.Equals(item.Name, categoryName, StringComparison.OrdinalIgnoreCase));
+            if (category is null)
+            {
+                category = new DeskCategory { Name = categoryName };
+                config.DesktopCategories.Add(category);
+                changed = true;
+            }
+
+            foreach (var path in Directory.EnumerateFileSystemEntries(categoryDirectory)
+                         .OrderBy(Path.GetFileName, StringComparer.CurrentCultureIgnoreCase))
+            {
+                var normalized = NormalizePath(path);
+                if (existingPaths.Add(normalized))
+                {
+                    category.ItemPaths.Add(normalized);
+                    changed = true;
+                }
+            }
         }
 
-        return removed;
+        return changed;
+    }
+
+    public static bool RemoveDesktopDuplicateOrganizerReferences(AppConfig config)
+    {
+        var organizerNames = config.DesktopCategories
+            .SelectMany(category => category.ItemPaths)
+            .Where(path => File.Exists(path) || Directory.Exists(path))
+            .Select(Path.GetFileName)
+            .Where(name => !string.IsNullOrWhiteSpace(name))
+            .ToHashSet(StringComparer.OrdinalIgnoreCase);
+        if (organizerNames.Count == 0)
+        {
+            return false;
+        }
+
+        var removedDuplicates = false;
+        foreach (var desktopPath in GetDesktopEntryPaths())
+        {
+            var name = Path.GetFileName(desktopPath);
+            if (!string.IsNullOrWhiteSpace(name)
+                && organizerNames.Contains(name)
+                && TryRecycleDesktopDuplicate(desktopPath))
+            {
+                removedDuplicates = true;
+            }
+        }
+
+        return removedDuplicates;
     }
 
     public static void RemoveOrganizerReferences(AppConfig config, params string?[] paths)
@@ -14436,11 +14491,22 @@ internal static class DesktopOrganizerStorage
     private static HashSet<string> GetDesktopEntryNames()
     {
         var names = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-        foreach (var desktop in new[]
+        foreach (var path in GetDesktopEntryPaths())
         {
-            Environment.GetFolderPath(Environment.SpecialFolder.DesktopDirectory),
-            Environment.GetFolderPath(Environment.SpecialFolder.CommonDesktopDirectory)
-        })
+            var name = Path.GetFileName(path);
+            if (!string.IsNullOrWhiteSpace(name))
+            {
+                names.Add(name);
+            }
+        }
+
+        return names;
+    }
+
+    private static IEnumerable<string> GetDesktopEntryPaths()
+    {
+        var paths = new List<string>();
+        foreach (var desktop in GetDesktopDirectories())
         {
             if (string.IsNullOrWhiteSpace(desktop) || !Directory.Exists(desktop))
             {
@@ -14449,21 +14515,53 @@ internal static class DesktopOrganizerStorage
 
             try
             {
-                foreach (var path in Directory.EnumerateFileSystemEntries(desktop))
-                {
-                    var name = Path.GetFileName(path);
-                    if (!string.IsNullOrWhiteSpace(name))
-                    {
-                        names.Add(name);
-                    }
-                }
+                paths.AddRange(Directory.EnumerateFileSystemEntries(desktop));
             }
             catch
             {
             }
         }
 
-        return names;
+        return paths;
+    }
+
+    private static IEnumerable<string> GetDesktopDirectories()
+    {
+        yield return Environment.GetFolderPath(Environment.SpecialFolder.DesktopDirectory);
+        yield return Environment.GetFolderPath(Environment.SpecialFolder.CommonDesktopDirectory);
+    }
+
+    private static bool TryRecycleDesktopDuplicate(string path)
+    {
+        try
+        {
+            var wasDirectory = Directory.Exists(path);
+            if (File.Exists(path))
+            {
+                Microsoft.VisualBasic.FileIO.FileSystem.DeleteFile(
+                    path,
+                    Microsoft.VisualBasic.FileIO.UIOption.OnlyErrorDialogs,
+                    Microsoft.VisualBasic.FileIO.RecycleOption.SendToRecycleBin);
+            }
+            else if (wasDirectory)
+            {
+                Microsoft.VisualBasic.FileIO.FileSystem.DeleteDirectory(
+                    path,
+                    Microsoft.VisualBasic.FileIO.UIOption.OnlyErrorDialogs,
+                    Microsoft.VisualBasic.FileIO.RecycleOption.SendToRecycleBin);
+            }
+            else
+            {
+                return false;
+            }
+
+            NativeGlass.NotifyShellDeleted(path, wasDirectory);
+            return true;
+        }
+        catch
+        {
+            return false;
+        }
     }
 
     private static string SanitizeFileName(string name)
@@ -15228,7 +15326,9 @@ internal sealed class DesktopOrganizerWidgetForm : Form
 
     private void RefreshList()
     {
-        if (DesktopOrganizerStorage.RemoveDesktopDuplicateOrganizerReferences(_config))
+        var changed = DesktopOrganizerStorage.EnsureOrganizerFileSystemReferences(_config, _store);
+        changed |= DesktopOrganizerStorage.RemoveDesktopDuplicateOrganizerReferences(_config);
+        if (changed)
         {
             _store.SaveConfig(_config);
         }
@@ -20921,7 +21021,7 @@ internal sealed class SettingsPageCanvas : Control
         _versionScrollOffset = Math.Max(0, _versionScrollOffset);
         var y = content.Y - _versionScrollOffset;
 
-        DrawVersionSection(g, content, "1.6.0 更新记录", new[]
+        DrawVersionSection(g, content, "1.6.1 更新记录", new[]
         {
             "所有删除和高风险清空操作增加二次确认，桌面收纳拖入拖出仍保持原来的直接移动逻辑。",
             "设置中心新增数据备份和恢复，覆盖布局、桌面收纳内容、图标文件和记录。",
