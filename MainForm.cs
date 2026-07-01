@@ -25657,6 +25657,29 @@ internal static class ShellIconLoader
     private const int IldTransparent = 0x1;
     private const int PreferredIconSize = 64;
     private const int MaxPath = 260;
+    private const uint DiNormal = 0x0003;
+    private const string AppxManifestFileName = "AppxManifest.xml";
+    private const int ErrorSuccess = 0;
+    private const int ErrorInsufficientBuffer = 122;
+
+    private static Bitmap HIconToBitmap(IntPtr hIcon, int size)
+    {
+        var bitmap = new Bitmap(size, size, System.Drawing.Imaging.PixelFormat.Format32bppArgb);
+        using (var g = Graphics.FromImage(bitmap))
+        {
+            var hdc = g.GetHdc();
+            try
+            {
+                DrawIconEx(hdc, 0, 0, hIcon, size, size, 0, IntPtr.Zero, DiNormal);
+            }
+            finally
+            {
+                g.ReleaseHdc(hdc);
+            }
+        }
+
+        return NormalizeIconBitmap(bitmap, size, disposeSource: true);
+    }
 
     public static Image? LoadLargeIcon(string path)
     {
@@ -25722,8 +25745,7 @@ internal static class ShellIconLoader
 
             try
             {
-                using var icon = (Icon)Icon.FromHandle(fileInfo.hIcon).Clone();
-                return icon.ToBitmap();
+                return HIconToBitmap(fileInfo.hIcon, PreferredIconSize);
             }
             finally
             {
@@ -25785,8 +25807,7 @@ internal static class ShellIconLoader
                 return null;
             }
 
-            using var icon = (Icon)Icon.FromHandle(iconHandle).Clone();
-            return icon.ToBitmap();
+            return HIconToBitmap(iconHandle, PreferredIconSize);
         }
         catch
         {
@@ -25821,6 +25842,16 @@ internal static class ShellIconLoader
             var targetPath = new StringBuilder(MaxPath);
             shellLink.GetPath(targetPath, targetPath.Capacity, IntPtr.Zero, 0);
             var target = Environment.ExpandEnvironmentVariables(targetPath.ToString());
+            if (string.IsNullOrWhiteSpace(target))
+            {
+                target = TryGetShellLinkTargetParsingPath(shortcutPath) ?? string.Empty;
+            }
+
+            if (TryLoadPackagedAppIcon(target, out image))
+            {
+                return true;
+            }
+
             var targetDirectory = !string.IsNullOrWhiteSpace(target) ? Path.GetDirectoryName(target) : null;
 
             var workingDirectory = new StringBuilder(MaxPath);
@@ -25874,6 +25905,357 @@ internal static class ShellIconLoader
         }
 
         return false;
+    }
+
+    private static string? TryGetShellLinkTargetParsingPath(string shortcutPath)
+    {
+        var value = TryGetShellExtendedProperty(shortcutPath, "System.Link.TargetParsingPath");
+        return string.IsNullOrWhiteSpace(value) ? null : Environment.ExpandEnvironmentVariables(value.Trim());
+    }
+
+    private static string? TryGetShellExtendedProperty(string path, string propertyName)
+    {
+        object? shell = null;
+        object? folder = null;
+        object? item = null;
+        try
+        {
+            var directory = Path.GetDirectoryName(path);
+            var fileName = Path.GetFileName(path);
+            if (string.IsNullOrWhiteSpace(directory) || string.IsNullOrWhiteSpace(fileName))
+            {
+                return null;
+            }
+
+            var shellType = Type.GetTypeFromProgID("Shell.Application");
+            if (shellType is null)
+            {
+                return null;
+            }
+
+            shell = Activator.CreateInstance(shellType);
+            if (shell is null)
+            {
+                return null;
+            }
+
+            folder = shellType.InvokeMember(
+                "NameSpace",
+                System.Reflection.BindingFlags.InvokeMethod,
+                binder: null,
+                target: shell,
+                args: new object[] { directory });
+            if (folder is null)
+            {
+                return null;
+            }
+
+            item = folder.GetType().InvokeMember(
+                "ParseName",
+                System.Reflection.BindingFlags.InvokeMethod,
+                binder: null,
+                target: folder,
+                args: new object[] { fileName });
+            if (item is null)
+            {
+                return null;
+            }
+
+            var value = item.GetType().InvokeMember(
+                "ExtendedProperty",
+                System.Reflection.BindingFlags.InvokeMethod,
+                binder: null,
+                target: item,
+                args: new object[] { propertyName });
+            return value?.ToString();
+        }
+        catch
+        {
+            return null;
+        }
+        finally
+        {
+            ReleaseComObject(item);
+            ReleaseComObject(folder);
+            ReleaseComObject(shell);
+        }
+    }
+
+    private static void ReleaseComObject(object? comObject)
+    {
+        if (comObject is not null && Marshal.IsComObject(comObject))
+        {
+            Marshal.FinalReleaseComObject(comObject);
+        }
+    }
+
+    private static bool TryLoadPackagedAppIcon(string targetParsingPath, out Image? image)
+    {
+        image = null;
+        if (string.IsNullOrWhiteSpace(targetParsingPath))
+        {
+            return false;
+        }
+
+        var separator = targetParsingPath.IndexOf('!');
+        if (separator <= 0 || separator >= targetParsingPath.Length - 1)
+        {
+            return false;
+        }
+
+        var packageFamilyName = targetParsingPath[..separator].Trim();
+        var appId = targetParsingPath[(separator + 1)..].Trim();
+        if (string.IsNullOrWhiteSpace(packageFamilyName) || string.IsNullOrWhiteSpace(appId))
+        {
+            return false;
+        }
+
+        foreach (var packageDirectory in ResolvePackageInstallDirectories(packageFamilyName))
+        {
+            image = LoadPackagedAppIcon(packageDirectory, appId);
+            if (image is not null)
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    private static IEnumerable<string> ResolvePackageInstallDirectories(string packageFamilyName)
+    {
+        var resolvedPaths = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var directory in ResolvePackageInstallDirectoriesFromAppModel(packageFamilyName))
+        {
+            if (resolvedPaths.Add(directory))
+            {
+                yield return directory;
+            }
+        }
+
+        var splitAt = packageFamilyName.LastIndexOf('_');
+        if (splitAt <= 0 || splitAt >= packageFamilyName.Length - 1)
+        {
+            yield break;
+        }
+
+        var packageName = packageFamilyName[..splitAt];
+        var publisherId = packageFamilyName[(splitAt + 1)..];
+        var windowsApps = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles), "WindowsApps");
+        if (!Directory.Exists(windowsApps))
+        {
+            yield break;
+        }
+
+        IEnumerable<string> directories;
+        try
+        {
+            directories = Directory.EnumerateDirectories(windowsApps, $"{packageName}_*__{publisherId}")
+                .OrderByDescending(Directory.GetLastWriteTimeUtc)
+                .ToArray();
+        }
+        catch
+        {
+            yield break;
+        }
+
+        foreach (var directory in directories)
+        {
+            if (resolvedPaths.Add(directory))
+            {
+                yield return directory;
+            }
+        }
+    }
+
+    private static IEnumerable<string> ResolvePackageInstallDirectoriesFromAppModel(string packageFamilyName)
+    {
+        foreach (var packageFullName in GetPackageFullNames(packageFamilyName))
+        {
+            var directory = GetPackagePath(packageFullName);
+            if (!string.IsNullOrWhiteSpace(directory) && Directory.Exists(directory))
+            {
+                yield return directory;
+            }
+        }
+    }
+
+    private static IEnumerable<string> GetPackageFullNames(string packageFamilyName)
+    {
+        var packageNamePointers = IntPtr.Zero;
+        var packageNameBuffer = IntPtr.Zero;
+        try
+        {
+            uint count = 0;
+            uint bufferLength = 0;
+            var result = GetPackagesByPackageFamily(packageFamilyName, ref count, IntPtr.Zero, ref bufferLength, IntPtr.Zero);
+            if (result != ErrorInsufficientBuffer || count == 0 || bufferLength == 0)
+            {
+                yield break;
+            }
+
+            packageNamePointers = Marshal.AllocHGlobal(IntPtr.Size * (int)count);
+            packageNameBuffer = Marshal.AllocHGlobal(sizeof(char) * (int)bufferLength);
+            result = GetPackagesByPackageFamily(packageFamilyName, ref count, packageNamePointers, ref bufferLength, packageNameBuffer);
+            if (result != ErrorSuccess)
+            {
+                yield break;
+            }
+
+            for (var i = 0; i < count; i++)
+            {
+                var pointer = Marshal.ReadIntPtr(packageNamePointers, i * IntPtr.Size);
+                if (pointer == IntPtr.Zero)
+                {
+                    continue;
+                }
+
+                var packageFullName = Marshal.PtrToStringUni(pointer);
+                if (!string.IsNullOrWhiteSpace(packageFullName))
+                {
+                    yield return packageFullName;
+                }
+            }
+        }
+        finally
+        {
+            if (packageNamePointers != IntPtr.Zero)
+            {
+                Marshal.FreeHGlobal(packageNamePointers);
+            }
+
+            if (packageNameBuffer != IntPtr.Zero)
+            {
+                Marshal.FreeHGlobal(packageNameBuffer);
+            }
+        }
+    }
+
+    private static string? GetPackagePath(string packageFullName)
+    {
+        try
+        {
+            uint pathLength = 0;
+            var result = GetPackagePathByFullName(packageFullName, ref pathLength, null);
+            if (result != ErrorInsufficientBuffer || pathLength == 0)
+            {
+                return null;
+            }
+
+            var path = new StringBuilder((int)pathLength);
+            result = GetPackagePathByFullName(packageFullName, ref pathLength, path);
+            return result == ErrorSuccess ? path.ToString().TrimEnd('\0') : null;
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
+    private static Image? LoadPackagedAppIcon(string packageDirectory, string appId)
+    {
+        try
+        {
+            var manifestPath = Path.Combine(packageDirectory, AppxManifestFileName);
+            if (!File.Exists(manifestPath))
+            {
+                return null;
+            }
+
+            var document = System.Xml.Linq.XDocument.Load(manifestPath);
+            var applications = document.Descendants().Where(element => element.Name.LocalName == "Application");
+            var application = applications.FirstOrDefault(element => string.Equals((string?)element.Attribute("Id"), appId, StringComparison.OrdinalIgnoreCase))
+                ?? applications.FirstOrDefault();
+            var visualElements = application?.Elements().FirstOrDefault(element => element.Name.LocalName == "VisualElements");
+            var logoPaths = new[]
+                {
+                    (string?)visualElements?.Attribute("Square150x150Logo"),
+                    (string?)visualElements?.Attribute("Square44x44Logo"),
+                    document.Descendants().FirstOrDefault(element => element.Name.LocalName == "Properties")
+                        ?.Elements().FirstOrDefault(element => element.Name.LocalName == "Logo")?.Value
+                }
+                .Where(path => !string.IsNullOrWhiteSpace(path))
+                .SelectMany(path => ResolvePackagedIconPathCandidates(packageDirectory, path!))
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .ToArray();
+
+            return LoadBestIconImage(logoPaths);
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
+    private static IEnumerable<string> ResolvePackagedIconPathCandidates(string packageDirectory, string relativeLogoPath)
+    {
+        var normalized = relativeLogoPath.Replace('/', Path.DirectorySeparatorChar).Replace('\\', Path.DirectorySeparatorChar);
+        string exactPath;
+        try
+        {
+            exactPath = Path.GetFullPath(Path.Combine(packageDirectory, normalized));
+        }
+        catch
+        {
+            yield break;
+        }
+
+        if (File.Exists(exactPath))
+        {
+            yield return exactPath;
+        }
+
+        var directory = Path.GetDirectoryName(exactPath);
+        if (string.IsNullOrWhiteSpace(directory) || !Directory.Exists(directory))
+        {
+            yield break;
+        }
+
+        var name = Path.GetFileNameWithoutExtension(exactPath);
+        var extension = Path.GetExtension(exactPath);
+        IEnumerable<string> candidates;
+        try
+        {
+            candidates = Directory.EnumerateFiles(directory, $"{name}*{extension}").ToArray();
+        }
+        catch
+        {
+            yield break;
+        }
+
+        foreach (var candidate in candidates)
+        {
+            yield return candidate;
+        }
+    }
+
+    private static Image? LoadBestIconImage(IEnumerable<string> paths)
+    {
+        Bitmap? best = null;
+        var bestScore = -1;
+        foreach (var path in paths)
+        {
+            try
+            {
+                using var stream = new MemoryStream(File.ReadAllBytes(path));
+                using var source = Image.FromStream(stream);
+                var score = source.Width * source.Height;
+                if (score <= bestScore)
+                {
+                    continue;
+                }
+
+                var normalized = NormalizeIconBitmap(new Bitmap(source), PreferredIconSize, disposeSource: true);
+                best?.Dispose();
+                best = normalized;
+                bestScore = score;
+            }
+            catch
+            {
+            }
+        }
+
+        return best;
     }
 
     private static bool TryLoadInternetShortcutIcon(string shortcutPath, out Image? image)
@@ -26034,8 +26416,7 @@ internal static class ShellIconLoader
 
             try
             {
-                using var icon = (Icon)Icon.FromHandle(fileInfo.hIcon).Clone();
-                return icon.ToBitmap();
+                return HIconToBitmap(fileInfo.hIcon, PreferredIconSize);
             }
             finally
             {
@@ -26092,8 +26473,7 @@ internal static class ShellIconLoader
 
             try
             {
-                using var icon = (Icon)Icon.FromHandle(icons[0]).Clone();
-                return icon.ToBitmap();
+                return HIconToBitmap(icons[0], size);
             }
             finally
             {
@@ -26104,6 +26484,78 @@ internal static class ShellIconLoader
         {
             return null;
         }
+    }
+
+    private static Bitmap NormalizeIconBitmap(Bitmap source, int targetSize, bool disposeSource)
+    {
+        try
+        {
+            var bounds = FindVisibleContentBounds(source);
+            if (bounds.IsEmpty)
+            {
+                return new Bitmap(source);
+            }
+
+            var contentCoverage = Math.Max(bounds.Width / (float)source.Width, bounds.Height / (float)source.Height);
+            var contentIsUndersized = contentCoverage < 0.68F;
+            var sourceBounds = contentIsUndersized
+                ? bounds
+                : new Rectangle(0, 0, source.Width, source.Height);
+            if (!contentIsUndersized && source.Width == targetSize && source.Height == targetSize)
+            {
+                return new Bitmap(source);
+            }
+
+            var padding = contentIsUndersized ? Math.Max(2, targetSize / 16) : 0;
+            var available = Math.Max(1, targetSize - padding * 2);
+            var scale = Math.Min(available / (float)sourceBounds.Width, available / (float)sourceBounds.Height);
+            var width = Math.Max(1, (int)Math.Round(sourceBounds.Width * scale));
+            var height = Math.Max(1, (int)Math.Round(sourceBounds.Height * scale));
+            var target = new Rectangle((targetSize - width) / 2, (targetSize - height) / 2, width, height);
+            var result = new Bitmap(targetSize, targetSize, System.Drawing.Imaging.PixelFormat.Format32bppArgb);
+            using var graphics = Graphics.FromImage(result);
+            graphics.Clear(Color.Transparent);
+            graphics.InterpolationMode = InterpolationMode.HighQualityBicubic;
+            graphics.CompositingQuality = CompositingQuality.HighQuality;
+            graphics.PixelOffsetMode = PixelOffsetMode.HighQuality;
+            graphics.DrawImage(source, target, sourceBounds, GraphicsUnit.Pixel);
+            return result;
+        }
+        finally
+        {
+            if (disposeSource)
+            {
+                source.Dispose();
+            }
+        }
+    }
+
+    private static Rectangle FindVisibleContentBounds(Bitmap bitmap)
+    {
+        var left = bitmap.Width;
+        var top = bitmap.Height;
+        var right = -1;
+        var bottom = -1;
+        for (var y = 0; y < bitmap.Height; y++)
+        {
+            for (var x = 0; x < bitmap.Width; x++)
+            {
+                var pixel = bitmap.GetPixel(x, y);
+                if (pixel.A <= 18)
+                {
+                    continue;
+                }
+
+                left = Math.Min(left, x);
+                top = Math.Min(top, y);
+                right = Math.Max(right, x);
+                bottom = Math.Max(bottom, y);
+            }
+        }
+
+        return right < left || bottom < top
+            ? Rectangle.Empty
+            : Rectangle.FromLTRB(left, top, right + 1, bottom + 1);
     }
 
     [DllImport("shell32.dll", CharSet = CharSet.Unicode)]
@@ -26127,7 +26579,24 @@ internal static class ShellIconLoader
     private static extern bool DestroyIcon(IntPtr hIcon);
 
     [DllImport("user32.dll", CharSet = CharSet.Unicode)]
+    private static extern bool DrawIconEx(IntPtr hdc, int x, int y, IntPtr hIcon, int cx, int cy, uint istepIfAniCur, IntPtr hbrFlickerFreeDraw, uint diFlags);
+
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)]
     private static extern uint PrivateExtractIcons(string fileName, int iconIndex, int iconWidth, int iconHeight, IntPtr[] iconHandles, uint[] iconIds, uint icons, uint flags);
+
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode)]
+    private static extern int GetPackagesByPackageFamily(
+        string packageFamilyName,
+        ref uint count,
+        IntPtr packageFullNames,
+        ref uint bufferLength,
+        IntPtr buffer);
+
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode)]
+    private static extern int GetPackagePathByFullName(
+        string packageFullName,
+        ref uint pathLength,
+        StringBuilder? path);
 
     [DllImport("shell32.dll", SetLastError = true)]
     private static extern int SHGetImageList(int imageList, ref Guid riid, out IImageList? imageListObject);
