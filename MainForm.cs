@@ -1,10 +1,11 @@
-using System.Diagnostics;
+﻿using System.Diagnostics;
 using System.Drawing;
 using System.Drawing.Drawing2D;
 using System.Globalization;
 using System.IO.Compression;
 using System.Net.NetworkInformation;
 using System.Text;
+using System.Xml.Linq;
 using Microsoft.Win32;
 using System.Runtime.InteropServices;
 using System.Windows.Forms;
@@ -1789,6 +1790,7 @@ public sealed class MainForm : Form
                 Activate();
                 _nav.SelectedIndex = 1;
             };
+            _desktopOrganizerWidget.OpenRequested += OpenPath;
             _desktopOrganizerWidget.SplitRequested += SplitDesktopOrganizerWidgets;
             _desktopOrganizerWidget.FormClosed += (_, _) =>
             {
@@ -1892,6 +1894,7 @@ public sealed class MainForm : Form
             Activate();
             _nav.SelectedIndex = 1;
         };
+        splitWidget.OpenRequested += OpenPath;
         splitWidget.MergeRequested += target => MergeDesktopOrganizerSplitWidget(splitWidget, target);
         splitWidget.FormClosed += (_, _) =>
         {
@@ -3795,7 +3798,11 @@ public sealed class MainForm : Form
                 return;
             }
 
-            _config.DesktopCategories.Remove(category);
+            if (!DesktopOrganizerStorage.DeleteCategory(_config, _store, category))
+            {
+                MessageBox.Show(this, "分类中有文件无法移回桌面，可能是桌面已有同名文件或文件夹。\n请先处理同名项后再删除。", "DustDesk", MessageBoxButtons.OK, MessageBoxIcon.Information);
+            }
+
             _store.SaveConfig(_config);
             RefreshAll();
         };
@@ -3827,9 +3834,15 @@ public sealed class MainForm : Form
         canvas.AddToCategoryRequested += AddPathsToCategory;
         canvas.RemoveFromCategoryRequested += paths =>
         {
+            var failed = false;
             foreach (var path in paths)
             {
-                DesktopOrganizerStorage.MoveToDesktopAndRemove(_config, path);
+                failed |= string.IsNullOrWhiteSpace(DesktopOrganizerStorage.MoveToDesktopAndRemove(_config, path));
+            }
+
+            if (failed)
+            {
+                MessageBox.Show(this, "部分文件无法移到桌面：桌面上可能已有同名文件或文件夹。", "DustDesk", MessageBoxButtons.OK, MessageBoxIcon.Information);
             }
 
             _store.SaveConfig(_config);
@@ -13179,6 +13192,9 @@ internal sealed class DesktopNoteWidgetForm : Form
 {
     private const int WsExToolWindow = 0x00000080;
     private const int WsExAppWindow = 0x00040000;
+    private const int CollapsedHeight = 42;
+    private static readonly Size ExpandedMinimumSize = new(140, 100);
+    private static readonly Size CollapsedMinimumSize = new(180, CollapsedHeight);
     private readonly NoteItem _note;
     private readonly DesktopNoteWidgetView _view;
     private readonly Action<NoteItem, Rectangle> _placementChanged;
@@ -13192,6 +13208,7 @@ internal sealed class DesktopNoteWidgetForm : Form
     private bool _positionLocked;
     private bool _attachedToDesktop;
     private bool _restoringPlacement;
+    private bool _collapsed;
 
     public DesktopNoteWidgetForm(NoteItem note, Action noteChanged, Action manageRequested, Action<NoteItem, Rectangle> placementChanged, Action renameRequested)
     {
@@ -13212,6 +13229,7 @@ internal sealed class DesktopNoteWidgetForm : Form
         _view.BeginMoveRequested += BeginManualMove;
         _view.BeginResizeRequested += BeginManualResize;
         _view.LockPositionChanged += SetPositionLocked;
+        _view.ToggleCollapsedRequested += ToggleCollapsed;
         _view.CloseRequested += () =>
         {
             if (ConfirmationDialogs.ConfirmRemoveDesktopComponent(this))
@@ -13222,7 +13240,7 @@ internal sealed class DesktopNoteWidgetForm : Form
         Controls.Add(_view);
         DesktopWidgetStyle.OpacityChanged += _view.Invalidate;
         FormClosed += (_, _) => DesktopWidgetStyle.OpacityChanged -= _view.Invalidate;
-        MinimumSize = new Size(140, 100);
+        MinimumSize = ExpandedMinimumSize;
         if (_note.ImageOnly && !_view.NaturalImageSize.IsEmpty)
         {
             SetScreenBounds(new Rectangle(_screenBounds.Location, _view.NaturalImageSize));
@@ -13252,6 +13270,7 @@ internal sealed class DesktopNoteWidgetForm : Form
     {
         _placement = placement;
         SetPositionLocked(placement?.Locked == true, save: false);
+        SetCollapsed(placement?.IsCollapsed == true, save: false, resize: false);
         ApplyPlacementOrDefault(placement);
         Show();
         NativeGlass.ApplyToolWindowStyle(Handle);
@@ -13325,7 +13344,8 @@ internal sealed class DesktopNoteWidgetForm : Form
         {
             if (placement is not null && placement.Width > 0 && placement.Height > 0)
             {
-                SetScreenBounds(new Rectangle(placement.X, placement.Y, Math.Max(MinimumSize.Width, placement.Width), Math.Max(MinimumSize.Height, placement.Height)));
+                var height = _collapsed ? CollapsedHeight : Math.Max(ExpandedMinimumSize.Height, placement.Height);
+                SetScreenBounds(new Rectangle(placement.X, placement.Y, Math.Max(MinimumSize.Width, placement.Width), height));
                 return;
             }
 
@@ -13375,7 +13395,52 @@ internal sealed class DesktopNoteWidgetForm : Form
 
     private void BeginManualResize()
     {
+        if (_collapsed)
+        {
+            return;
+        }
+
         BeginManualDrag(resize: true);
+    }
+
+    private void ToggleCollapsed()
+    {
+        SetCollapsed(!_collapsed, save: true, resize: true);
+    }
+
+    private void SetCollapsed(bool collapsed, bool save, bool resize)
+    {
+        var current = _screenBounds.Width > 0 && _screenBounds.Height > 0 ? _screenBounds : Bounds;
+        if (collapsed && _placement is not null && !_collapsed && current.Height > CollapsedHeight)
+        {
+            _placement.ExpandedWidth = Math.Max(ExpandedMinimumSize.Width, current.Width);
+            _placement.ExpandedHeight = Math.Max(ExpandedMinimumSize.Height, current.Height);
+        }
+
+        _collapsed = collapsed;
+        MinimumSize = _collapsed ? CollapsedMinimumSize : ExpandedMinimumSize;
+        _view.SetCollapsed(_collapsed);
+        if (_placement is not null)
+        {
+            _placement.IsCollapsed = _collapsed;
+        }
+
+        if (resize && IsHandleCreated)
+        {
+            current = _screenBounds.Width > 0 && _screenBounds.Height > 0 ? _screenBounds : Bounds;
+            var width = _collapsed
+                ? Math.Max(CollapsedMinimumSize.Width, current.Width)
+                : Math.Max(ExpandedMinimumSize.Width, _placement?.ExpandedWidth > 0 ? _placement.ExpandedWidth : current.Width);
+            var height = _collapsed
+                ? CollapsedHeight
+                : Math.Max(ExpandedMinimumSize.Height, _placement?.ExpandedHeight > CollapsedHeight ? _placement.ExpandedHeight : 300);
+            SetScreenBounds(new Rectangle(current.X, current.Y, width, height));
+        }
+
+        if (save)
+        {
+            SavePlacement();
+        }
     }
 
     private void SetPositionLocked(bool locked)
@@ -13464,6 +13529,11 @@ internal sealed class DesktopNoteWidgetForm : Form
             return;
         }
 
+        if (_placement is not null)
+        {
+            _placement.IsCollapsed = _collapsed;
+        }
+
         _placementChanged(_note, _screenBounds.Width > 0 && _screenBounds.Height > 0 ? _screenBounds : Bounds);
     }
 
@@ -13476,6 +13546,7 @@ internal sealed class DesktopNoteWidgetView : Control
     private readonly Action _manageRequested;
     private readonly Action _renameRequested;
     private readonly ContextMenuStrip _menu;
+    private readonly ToolStripMenuItem _collapseMenuItem = new("折叠");
     private readonly ToolStripMenuItem _lockPositionMenuItem = new("锁定位置");
     private readonly System.Windows.Forms.Timer _menuDismissTimer = new() { Interval = 40 };
     private readonly Color _menuButtonColor;
@@ -13485,6 +13556,7 @@ internal sealed class DesktopNoteWidgetView : Control
     private Rectangle _closeRect;
     private Point? _pendingTitleMoveStart;
     private bool _positionLocked;
+    private bool _collapsed;
     private const int TitleMoveThreshold = 6;
 
     public DesktopNoteWidgetView(NoteItem note, Action noteChanged, Action manageRequested, Action renameRequested)
@@ -13538,6 +13610,7 @@ internal sealed class DesktopNoteWidgetView : Control
     public event Action? BeginResizeRequested;
     public event Action? CloseRequested;
     public event Action<bool>? LockPositionChanged;
+    public event Action? ToggleCollapsedRequested;
 
     public void SetPositionLocked(bool locked)
     {
@@ -13545,6 +13618,20 @@ internal sealed class DesktopNoteWidgetView : Control
         _lockPositionMenuItem.Checked = locked;
         _lockPositionMenuItem.Text = locked ? "已锁定" : "锁定位置";
         _lockPositionMenuItem.Image = LoadNoteMenuImage("zicaidan", _positionLocked ? "2-3.png" : "2-4.png");
+    }
+
+    public void SetCollapsed(bool collapsed)
+    {
+        if (_collapseMenuItem.Owner is null)
+        {
+            _collapseMenuItem.Click += (_, _) => ToggleCollapsedRequested?.Invoke();
+            _collapseMenuItem.Image = LoadNoteMenuImage("zicaidan", "2-5.png");
+            _menu.Items.Insert(Math.Min(1, _menu.Items.Count), _collapseMenuItem);
+        }
+
+        _collapsed = collapsed;
+        _collapseMenuItem.Text = _collapsed ? "展开" : "折叠";
+        Invalidate();
     }
 
     private void CloseMenuIfClickedOutside()
@@ -13604,6 +13691,29 @@ internal sealed class DesktopNoteWidgetView : Control
         if (e.Button == MouseButtons.Left && _closeRect.Contains(e.Location))
         {
             _menu.Show(this, new Point(_closeRect.Left - 26, _closeRect.Bottom + 4));
+            return;
+        }
+
+        if (_collapsed)
+        {
+            if (e.Button == MouseButtons.Left && GetTitleRect().Contains(e.Location))
+            {
+                if (e.Clicks > 1)
+                {
+                    ToggleCollapsedRequested?.Invoke();
+                    return;
+                }
+
+                _pendingTitleMoveStart = e.Location;
+                Capture = true;
+                return;
+            }
+
+            if (e.Button == MouseButtons.Left)
+            {
+                BeginMoveRequested?.Invoke();
+            }
+
             return;
         }
 
@@ -13670,14 +13780,15 @@ internal sealed class DesktopNoteWidgetView : Control
     protected override void OnMouseDoubleClick(MouseEventArgs e)
     {
         base.OnMouseDoubleClick(e);
+        if (e.Button == MouseButtons.Left && GetTitleRect().Contains(e.Location))
+        {
+            ToggleCollapsedRequested?.Invoke();
+            return;
+        }
+
         if (e.Button == MouseButtons.Left && !_note.ImageOnly && GetTextRect().Contains(e.Location))
         {
             BeginEdit(e.Location);
-        }
-
-        if (e.Button == MouseButtons.Left && !_note.ImageOnly && GetTitleRect().Contains(e.Location))
-        {
-            BeginTitleEdit();
         }
     }
 
@@ -13708,7 +13819,7 @@ internal sealed class DesktopNoteWidgetView : Control
             g.DrawRectangle(border, rect);
         }
 
-        if (_background is not null)
+        if (!_collapsed && _background is not null)
         {
             if (_note.ImageOnly)
             {
@@ -13720,14 +13831,14 @@ internal sealed class DesktopNoteWidgetView : Control
             }
         }
 
-        if (!_note.ImageOnly)
+        if (!_collapsed && !_note.ImageOnly)
         {
             var textRect = GetTextRect();
             using var font = new Font("Microsoft YaHei UI", Math.Clamp(_note.FontSize, 8F, 42F), _note.FontBold ? FontStyle.Bold : FontStyle.Regular);
             DrawWrappedText(g, _note.Text, font, textRect, NoteStyle.TextColor(_note));
         }
 
-        if (!_note.ImageOnly)
+        if (!_note.ImageOnly || _collapsed)
         {
             using var header = new SolidBrush(DesktopWidgetStyle.ContentFill);
             g.FillRectangle(header, 0, 0, Width, 36);
@@ -13738,7 +13849,10 @@ internal sealed class DesktopNoteWidgetView : Control
         _closeRect = new Rectangle(Width - 34, 4, 26, 26);
         DrawMenuButton(g, _closeRect);
 
-        DrawResizeGrip(g);
+        if (!_collapsed)
+        {
+            DrawResizeGrip(g);
+        }
     }
 
     private void DrawMenuButton(Graphics g, Rectangle rect)
@@ -14156,6 +14270,12 @@ internal static class DesktopOrganizerStorage
         }
 
         var target = GetDesktopTargetPath(source);
+        if (!File.Exists(source) && !Directory.Exists(source))
+        {
+            RemoveOrganizerReferences(config, source, target);
+            return !string.IsNullOrWhiteSpace(target) && (File.Exists(target) || Directory.Exists(target)) ? target : null;
+        }
+
         if (File.Exists(source) || Directory.Exists(source))
         {
             target = MoveToDesktop(source);
@@ -14268,6 +14388,39 @@ internal static class DesktopOrganizerStorage
         }
     }
 
+    public static bool DeleteCategory(AppConfig config, AppStore store, DeskCategory category)
+    {
+        var categoryDirectory = Path.Combine(store.DataDirectory, "DesktopOrganizer", SanitizeFileName(category.Name));
+        var paths = category.ItemPaths
+            .Where(path => !string.IsNullOrWhiteSpace(path))
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToArray();
+
+        foreach (var path in paths)
+        {
+            if (!File.Exists(path) && !Directory.Exists(path))
+            {
+                RemoveOrganizerReferences(config, path);
+                continue;
+            }
+
+            var target = MoveToDesktop(path);
+            if (!string.IsNullOrWhiteSpace(target))
+            {
+                RemoveOrganizerReferences(config, path, target);
+            }
+        }
+
+        TryDeleteEmptyDirectory(categoryDirectory);
+        if (DirectoryHasEntries(categoryDirectory))
+        {
+            return false;
+        }
+
+        config.DesktopCategories.Remove(category);
+        return true;
+    }
+
     public static string? MoveIntoCategory(AppStore store, DeskCategory category, string source)
     {
         if (string.IsNullOrWhiteSpace(source) || (!File.Exists(source) && !Directory.Exists(source)))
@@ -14284,6 +14437,12 @@ internal static class DesktopOrganizerStorage
         }
 
         var target = Path.Combine(folder, name);
+        if (!string.Equals(source, NormalizePath(target), StringComparison.OrdinalIgnoreCase)
+            && (File.Exists(target) || Directory.Exists(target)))
+        {
+            return null;
+        }
+
         return MoveToAvailablePath(source, target);
     }
 
@@ -14298,6 +14457,14 @@ internal static class DesktopOrganizerStorage
         if (target is null)
         {
             return null;
+        }
+
+        if (!string.Equals(NormalizePath(source), NormalizePath(target), StringComparison.OrdinalIgnoreCase))
+        {
+            if (File.Exists(target) || Directory.Exists(target))
+            {
+                return null;
+            }
         }
 
         return MoveToAvailablePath(source, target);
@@ -14324,7 +14491,6 @@ internal static class DesktopOrganizerStorage
             return source;
         }
 
-        DeleteExistingTarget(target);
         if (File.Exists(source))
         {
             MoveFile(source, target);
@@ -14336,20 +14502,6 @@ internal static class DesktopOrganizerStorage
 
         NativeGlass.NotifyShellMoved(source, target, sourceWasDirectory);
         return target;
-    }
-
-    private static void DeleteExistingTarget(string target)
-    {
-        if (File.Exists(target))
-        {
-            File.Delete(target);
-            return;
-        }
-
-        if (Directory.Exists(target))
-        {
-            Directory.Delete(target, recursive: true);
-        }
     }
 
     private static void MoveFile(string source, string target)
@@ -14408,36 +14560,29 @@ internal static class DesktopOrganizerStorage
         }
     }
 
-    private static string GetAvailableTargetPath(string target, bool directory)
+    private static void TryDeleteEmptyDirectory(string directory)
     {
-        if (!File.Exists(target) && !Directory.Exists(target))
+        try
         {
-            return target;
-        }
-
-        var parent = Path.GetDirectoryName(target) ?? string.Empty;
-        var name = Path.GetFileName(target);
-        if (directory)
-        {
-            for (var index = 2; ; index++)
+            if (Directory.Exists(directory) && !Directory.EnumerateFileSystemEntries(directory).Any())
             {
-                var candidate = Path.Combine(parent, $"{name} ({index})");
-                if (!File.Exists(candidate) && !Directory.Exists(candidate))
-                {
-                    return candidate;
-                }
+                Directory.Delete(directory);
             }
         }
-
-        var fileName = Path.GetFileNameWithoutExtension(target);
-        var extension = Path.GetExtension(target);
-        for (var index = 2; ; index++)
+        catch
         {
-            var candidate = Path.Combine(parent, $"{fileName} ({index}){extension}");
-            if (!File.Exists(candidate) && !Directory.Exists(candidate))
-            {
-                return candidate;
-            }
+        }
+    }
+
+    private static bool DirectoryHasEntries(string directory)
+    {
+        try
+        {
+            return Directory.Exists(directory) && Directory.EnumerateFileSystemEntries(directory).Any();
+        }
+        catch
+        {
+            return true;
         }
     }
 
@@ -14847,6 +14992,7 @@ internal sealed class DesktopOrganizerWidgetForm : Form
     }
 
     public event Action? ManageRequested;
+    public event Action<string>? OpenRequested;
     public event Action<IReadOnlyList<DeskCategory>>? SplitRequested;
     public event Action<DesktopOrganizerMergeTarget>? MergeRequested;
 
@@ -15183,7 +15329,7 @@ internal sealed class DesktopOrganizerWidgetForm : Form
         _view.MergeRequested += target => MergeRequested?.Invoke(target);
         _view.PathDroppedRequested += AddPathToCategoryFromWidget;
         _view.PathRemovedRequested += MovePathOutFromWidget;
-        _view.PathDetachedRequested += RemovePathFromOrganizerWidget;
+        _view.OpenRequested += path => OpenRequested?.Invoke(path);
         _view.ReorderRequested += () => _store.SaveConfig(_config);
         _view.SkinChangedRequested += () =>
         {
@@ -15374,24 +15520,28 @@ internal sealed class DesktopOrganizerWidgetForm : Form
 
     private void MovePathOutFromWidget(string path)
     {
-        if (string.IsNullOrWhiteSpace(path) || (!File.Exists(path) && !Directory.Exists(path)))
-        {
-            return;
-        }
-
-        DesktopOrganizerStorage.MoveToDesktopAndRemove(_config, path);
-        _store.SaveConfig(_config);
-        RefreshList();
-    }
-
-    private void RemovePathFromOrganizerWidget(string path)
-    {
         if (string.IsNullOrWhiteSpace(path))
         {
             return;
         }
 
-        DesktopOrganizerStorage.RemoveOrganizerReferences(_config, path);
+        string? target;
+        try
+        {
+            target = DesktopOrganizerStorage.MoveToDesktopAndRemove(_config, path);
+        }
+        catch (Exception ex)
+        {
+            MessageBox.Show(this, $"移到桌面失败：{ex.Message}", "DustDesk", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+            return;
+        }
+
+        if (string.IsNullOrWhiteSpace(target))
+        {
+            MessageBox.Show(this, "无法移到桌面：桌面上可能已有同名文件或文件夹。", "DustDesk", MessageBoxButtons.OK, MessageBoxIcon.Information);
+            return;
+        }
+
         _store.SaveConfig(_config);
         RefreshList();
     }
@@ -15655,6 +15805,11 @@ internal sealed class DesktopOrganizerWidgetView : Control
     private readonly ContextMenuStrip _settingsMenu = new();
     private readonly System.Windows.Forms.Timer _menuDismissTimer = new() { Interval = 40 };
     private readonly System.Windows.Forms.Timer _categoryLongPressTimer = new() { Interval = 350 };
+    private ContextMenuStrip? _itemMenu;
+    private readonly List<(Rectangle Rect, string Key)> _itemMenuAreas = new();
+    private string? _itemMenuPath;
+    private Rectangle _itemMenuBounds;
+    private string? _hoverItemMenuKey;
     private readonly bool _isSplit;
     private readonly ToolStripMenuItem _transparentMenuItem = new("透明");
     private readonly ToolStripMenuItem _showNamesMenuItem = new("显示名称");
@@ -15892,6 +16047,7 @@ internal sealed class DesktopOrganizerWidgetView : Control
             _itemToolTip.Dispose();
             _menu.Dispose();
             _settingsMenu.Dispose();
+            _itemMenu?.Dispose();
             foreach (var image in _menuItemImages)
             {
                 image.Dispose();
@@ -15918,7 +16074,7 @@ internal sealed class DesktopOrganizerWidgetView : Control
     public event Action? SkinChangedRequested;
     public event Action<DeskCategory, string, int?>? PathDroppedRequested;
     public event Action<string>? PathRemovedRequested;
-    public event Action<string>? PathDetachedRequested;
+    public event Action<string>? OpenRequested;
     public event Action? ReorderRequested;
     public event Action? HideRequested;
     public event Action? CloseRequested;
@@ -15992,7 +16148,7 @@ internal sealed class DesktopOrganizerWidgetView : Control
 
     private void StopMenuDismissWatcherIfMenusClosed()
     {
-        if (!_menu.Visible && !_settingsMenu.Visible)
+        if (!_menu.Visible && !_settingsMenu.Visible && (_itemMenu is null || !_itemMenu.Visible))
         {
             _menuDismissTimer.Stop();
         }
@@ -16008,13 +16164,15 @@ internal sealed class DesktopOrganizerWidgetView : Control
         var cursor = Cursor.Position;
         if (RectangleToScreen(ClientRectangle).Contains(cursor)
             || IsCursorInDropDown(_menu, cursor)
-            || IsCursorInDropDown(_settingsMenu, cursor))
+            || IsCursorInDropDown(_settingsMenu, cursor)
+            || (_itemMenu is not null && IsCursorInDropDown(_itemMenu, cursor)))
         {
             return;
         }
 
         _menu.Close(ToolStripDropDownCloseReason.AppClicked);
         _settingsMenu.Close(ToolStripDropDownCloseReason.AppClicked);
+        _itemMenu?.Close(ToolStripDropDownCloseReason.AppClicked);
     }
 
     private static bool IsCursorInDropDown(ToolStripDropDown dropDown, Point cursor)
@@ -16213,6 +16371,11 @@ internal sealed class DesktopOrganizerWidgetView : Control
     protected override void OnMouseDown(MouseEventArgs e)
     {
         UserActivityDetected?.Invoke();
+        if (HandleItemMenuMouseDown(e))
+        {
+            return;
+        }
+
         if (_collapsed)
         {
             var collapsedHit = _hotspots.FirstOrDefault(item => item.Rect.Contains(e.Location));
@@ -16239,11 +16402,7 @@ internal sealed class DesktopOrganizerWidgetView : Control
             {
                 _selectedItemPath = rightItemHit.Value.Path;
                 Invalidate();
-                if (ShellContextMenu.ShowForPath(Handle, rightItemHit.Value.Path, PointToScreen(e.Location)))
-                {
-                    RefreshRequested?.Invoke();
-                }
-
+                ShowItemMenu(rightItemHit.Value.Path, e.Location);
                 return;
             }
 
@@ -16359,6 +16518,19 @@ internal sealed class DesktopOrganizerWidgetView : Control
     protected override void OnMouseMove(MouseEventArgs e)
     {
         UserActivityDetected?.Invoke();
+        if (_itemMenuPath is not null)
+        {
+            var hoverKey = _itemMenuAreas.FirstOrDefault(item => item.Rect.Contains(e.Location)).Key;
+            if (!string.Equals(_hoverItemMenuKey, hoverKey, StringComparison.Ordinal))
+            {
+                _hoverItemMenuKey = hoverKey;
+                Invalidate();
+            }
+
+            Cursor = string.IsNullOrWhiteSpace(hoverKey) ? Cursors.Default : Cursors.Hand;
+            return;
+        }
+
         if (_pendingCategoryDragIndex is not null)
         {
             var dx = Math.Abs(e.X - _pendingCategoryDragStart.X);
@@ -16442,6 +16614,84 @@ internal sealed class DesktopOrganizerWidgetView : Control
             ? Math.Max(0, anchor.Y - size.Height - 4)
             : Math.Clamp(anchor.Y, 0, Math.Max(0, Height - size.Height));
         _settingsMenu.Show(this, new Point(x, y));
+    }
+
+    private void ShowItemMenu(string path, Point location)
+    {
+        _itemMenu?.Close(ToolStripDropDownCloseReason.CloseCalled);
+        _itemMenu?.Dispose();
+        _itemMenu = null;
+
+        const int width = 130;
+        const int rowHeight = 32;
+        const int rows = 3;
+        var x = Math.Clamp(location.X, 0, Math.Max(0, Width - width - 2));
+        var y = Math.Clamp(location.Y, 0, Math.Max(0, Height - rowHeight * rows - 2));
+
+        _itemMenuPath = path;
+        _itemMenuBounds = new Rectangle(x, y, width, rowHeight * rows);
+        _itemMenuAreas.Clear();
+        _itemMenuAreas.Add((new Rectangle(x, y, width, rowHeight), "open"));
+        _itemMenuAreas.Add((new Rectangle(x, y + rowHeight, width, rowHeight), "move"));
+        _itemMenuAreas.Add((new Rectangle(x, y + rowHeight * 2, width, rowHeight), "refresh"));
+        _hoverItemMenuKey = null;
+        Invalidate();
+    }
+
+    private bool HandleItemMenuMouseDown(MouseEventArgs e)
+    {
+        if (_itemMenuPath is null)
+        {
+            return false;
+        }
+
+        if (!_itemMenuBounds.Contains(e.Location))
+        {
+            HideItemMenu();
+            return false;
+        }
+
+        if (e.Button != MouseButtons.Left)
+        {
+            return true;
+        }
+
+        var key = _itemMenuAreas.FirstOrDefault(item => item.Rect.Contains(e.Location)).Key;
+        if (string.IsNullOrWhiteSpace(key))
+        {
+            return true;
+        }
+
+        var path = _itemMenuPath;
+        HideItemMenu();
+        switch (key)
+        {
+            case "open":
+                OpenRequested?.Invoke(path);
+                break;
+            case "move":
+                PathRemovedRequested?.Invoke(path);
+                break;
+            case "refresh":
+                RefreshRequested?.Invoke();
+                break;
+        }
+
+        return true;
+    }
+
+    private void HideItemMenu()
+    {
+        if (_itemMenuPath is null)
+        {
+            return;
+        }
+
+        _itemMenuPath = null;
+        _hoverItemMenuKey = null;
+        _itemMenuAreas.Clear();
+        _itemMenuBounds = Rectangle.Empty;
+        Invalidate();
     }
 
     protected override void OnMouseUp(MouseEventArgs e)
@@ -16770,6 +17020,76 @@ internal sealed class DesktopOrganizerWidgetView : Control
         }
         DrawCategoryList(g, card);
         DrawResizeGrip(g, card);
+        DrawItemMenu(g);
+    }
+
+    private void DrawItemMenu(Graphics g)
+    {
+        if (_itemMenuPath is null || _itemMenuBounds.IsEmpty)
+        {
+            return;
+        }
+
+        const int iconColumnWidth = 32;
+        using var shadow = new SolidBrush(Color.FromArgb(90, 0, 0, 0));
+        g.FillRectangle(shadow, new Rectangle(_itemMenuBounds.X + 3, _itemMenuBounds.Y + 3, _itemMenuBounds.Width, _itemMenuBounds.Height));
+        using var fill = new SolidBrush(Color.FromArgb(250, 250, 250));
+        using var border = new Pen(Color.FromArgb(160, 160, 160));
+        using var iconColumn = new SolidBrush(Color.FromArgb(242, 242, 242));
+        using var separator = new Pen(Color.FromArgb(210, 210, 210));
+        g.FillRectangle(fill, _itemMenuBounds);
+        g.FillRectangle(iconColumn, new Rectangle(_itemMenuBounds.X, _itemMenuBounds.Y, iconColumnWidth, _itemMenuBounds.Height));
+        g.DrawLine(separator, _itemMenuBounds.X + iconColumnWidth, _itemMenuBounds.Y + 2, _itemMenuBounds.X + iconColumnWidth, _itemMenuBounds.Bottom - 2);
+        g.DrawRectangle(border, _itemMenuBounds);
+
+        foreach (var item in _itemMenuAreas)
+        {
+            if (string.Equals(item.Key, _hoverItemMenuKey, StringComparison.Ordinal))
+            {
+                using var hover = new SolidBrush(Color.FromArgb(226, 239, 255));
+                g.FillRectangle(hover, Rectangle.Inflate(item.Rect, -2, -1));
+            }
+
+            var text = item.Key switch
+            {
+                "open" => "打开",
+                "move" => "移到桌面",
+                "refresh" => "刷新",
+                _ => ""
+            };
+            DrawItemMenuIcon(g, item.Key, new Rectangle(item.Rect.X + 7, item.Rect.Y + 8, 18, 16));
+            using var textBrush = new SolidBrush(Color.FromArgb(20, 20, 20));
+            var textRect = new RectangleF(item.Rect.X + iconColumnWidth + 12, item.Rect.Y, item.Rect.Width - iconColumnWidth - 16, item.Rect.Height);
+            using var format = new StringFormat { Alignment = StringAlignment.Near, LineAlignment = StringAlignment.Center, Trimming = StringTrimming.EllipsisCharacter };
+            g.DrawString(text, NormalFont, textBrush, textRect, format);
+        }
+    }
+
+    private static void DrawItemMenuIcon(Graphics g, string key, Rectangle rect)
+    {
+        using var pen = new Pen(Color.FromArgb(48, 48, 48), 1.4F);
+        using var brush = new SolidBrush(Color.FromArgb(48, 48, 48));
+        switch (key)
+        {
+            case "open":
+                g.DrawRectangle(pen, rect.X, rect.Y + 3, rect.Width, rect.Height - 5);
+                g.DrawLine(pen, rect.X + 3, rect.Y + 3, rect.X + 6, rect.Y);
+                g.DrawLine(pen, rect.X + 6, rect.Y, rect.X + 12, rect.Y);
+                g.DrawLine(pen, rect.X + 12, rect.Y, rect.X + 15, rect.Y + 3);
+                break;
+            case "move":
+                g.DrawLine(pen, rect.X + 2, rect.Y + rect.Height / 2, rect.Right - 3, rect.Y + rect.Height / 2);
+                g.DrawLine(pen, rect.Right - 7, rect.Y + 4, rect.Right - 3, rect.Y + rect.Height / 2);
+                g.DrawLine(pen, rect.Right - 7, rect.Bottom - 4, rect.Right - 3, rect.Y + rect.Height / 2);
+                g.FillEllipse(brush, rect.X + 1, rect.Y + 2, 4, 4);
+                g.FillEllipse(brush, rect.X + 1, rect.Bottom - 6, 4, 4);
+                break;
+            case "refresh":
+                g.DrawArc(pen, rect.X + 2, rect.Y + 1, rect.Width - 5, rect.Height - 4, 30, 280);
+                g.DrawLine(pen, rect.Right - 5, rect.Y + 3, rect.Right - 2, rect.Y + 8);
+                g.DrawLine(pen, rect.Right - 5, rect.Y + 3, rect.Right - 10, rect.Y + 4);
+                break;
+        }
     }
 
     private void DrawHeader(Graphics g, Rectangle card)
@@ -17002,7 +17322,6 @@ internal sealed class DesktopOrganizerWidgetView : Control
         Capture = false;
         var data = new DataObject();
         data.SetData(DataFormats.Text, path);
-        data.SetData(DataFormats.FileDrop, new[] { path });
         _activeDraggedItemPath = path;
         _handledActiveDraggedItemDrop = false;
         data.SetData(DustDeskDragData.LauncherCopyHandledFormat, new Action(() => _handledActiveDraggedItemDrop = true));
@@ -17021,12 +17340,12 @@ internal sealed class DesktopOrganizerWidgetView : Control
             MovePreview();
             GiveFeedback += giveFeedback;
             QueryContinueDrag += queryContinue;
-            var effect = DoDragDrop(data, DragDropEffects.Move | DragDropEffects.Copy);
+            var effect = DoDragDrop(data, DragDropEffects.Move);
             if (effect != DragDropEffects.None)
             {
                 if (!_handledActiveDraggedItemDrop)
                 {
-                    PathDetachedRequested?.Invoke(path);
+                    PathRemovedRequested?.Invoke(path);
                 }
             }
             else if (!_handledActiveDraggedItemDrop)
@@ -21021,6 +21340,14 @@ internal sealed class SettingsPageCanvas : Control
         _versionScrollOffset = Math.Max(0, _versionScrollOffset);
         var y = content.Y - _versionScrollOffset;
 
+        DrawVersionSection(g, content, "1.7.0 更新记录", new[]
+        {
+            "桌面收纳遇到同名文件或文件夹时直接拒绝移动，不覆盖、不自动改名。",
+            "修复收纳组件拖出到桌面后回到组件、无法落到桌面、误弹重名提示的问题。",
+            "修复拖拽流程卡住后桌面图标点击和右键无响应的问题。",
+            "修复收纳分类删除时物理目录残留导致内容状态不一致的问题。",
+            "补强快捷方式图标解析，并新增便签桌面组件折叠显示。"
+        }, content.X, ref y, content.Width);
         DrawVersionSection(g, content, "1.6.1 更新记录", new[]
         {
             "所有删除和高风险清空操作增加二次确认，桌面收纳拖入拖出仍保持原来的直接移动逻辑。",
@@ -25875,6 +26202,11 @@ internal static class ShellIconLoader
                 }
             }
 
+            if (TryLoadPackagedShortcutIcon(shortcutPath, out image))
+            {
+                return true;
+            }
+
             if (!string.IsNullOrWhiteSpace(target) && (File.Exists(target) || Directory.Exists(target)))
             {
                 image = ExtractIconBitmap(target, 0, PreferredIconSize) ?? LoadShellIcon(target);
@@ -26258,6 +26590,95 @@ internal static class ShellIconLoader
         return best;
     }
 
+    private static bool TryLoadPackagedShortcutIcon(string shortcutPath, out Image? image)
+    {
+        image = null;
+        if (!TryGetShortcutAppUserModelId(shortcutPath, out var appUserModelId))
+        {
+            return false;
+        }
+
+        if (TryLoadAppUserModelIcon(appUserModelId, out image))
+        {
+            return true;
+        }
+
+        return TryLoadPackagedAppIcon(appUserModelId, out image);
+    }
+
+    private static bool TryGetShortcutAppUserModelId(string shortcutPath, out string appUserModelId)
+    {
+        appUserModelId = "";
+        object? shellLinkObject = null;
+        try
+        {
+            shellLinkObject = new ShellLink();
+            var persistFile = (System.Runtime.InteropServices.ComTypes.IPersistFile)shellLinkObject;
+            persistFile.Load(shortcutPath, 0);
+            if (shellLinkObject is not IPropertyStore propertyStore)
+            {
+                return false;
+            }
+
+            var key = PropertyKeys.AppUserModelId;
+            propertyStore.GetValue(ref key, out var value);
+            try
+            {
+                appUserModelId = value.GetString() ?? "";
+            }
+            finally
+            {
+                PropVariantClear(ref value);
+            }
+
+            return !string.IsNullOrWhiteSpace(appUserModelId) && appUserModelId.Contains('!');
+        }
+        catch
+        {
+            return false;
+        }
+        finally
+        {
+            if (shellLinkObject is not null)
+            {
+                Marshal.FinalReleaseComObject(shellLinkObject);
+            }
+        }
+    }
+
+    private static bool TryLoadAppUserModelIcon(string appUserModelId, out Image? image)
+    {
+        image = null;
+        var idList = IntPtr.Zero;
+        try
+        {
+            var displayName = $@"shell:AppsFolder\{appUserModelId}";
+            if (SHParseDisplayName(displayName, IntPtr.Zero, out idList, 0, out _) < 0 || idList == IntPtr.Zero)
+            {
+                return false;
+            }
+
+            image = LoadShellIconFromPidl(idList);
+            if (image is not null && IsProbablyBlankGenericIcon(image))
+            {
+                image.Dispose();
+                image = null;
+            }
+
+            return image is not null;
+        }
+        catch
+        {
+            return false;
+        }
+        finally
+        {
+            if (idList != IntPtr.Zero)
+            {
+                CoTaskMemFree(idList);
+            }
+        }
+    }
     private static bool TryLoadInternetShortcutIcon(string shortcutPath, out Image? image)
     {
         image = null;
@@ -26600,6 +27021,65 @@ internal static class ShellIconLoader
 
     [DllImport("shell32.dll", SetLastError = true)]
     private static extern int SHGetImageList(int imageList, ref Guid riid, out IImageList? imageListObject);
+
+    [DllImport("shell32.dll", CharSet = CharSet.Unicode)]
+    private static extern int SHParseDisplayName(
+        string pszName,
+        IntPtr bindingContext,
+        out IntPtr pidl,
+        uint sfgaoIn,
+        out uint sfgaoOut);
+
+    [DllImport("ole32.dll")]
+    private static extern void CoTaskMemFree(IntPtr pv);
+
+    [DllImport("ole32.dll")]
+    private static extern int PropVariantClear(ref PROPVARIANT propVariant);
+
+    private static class PropertyKeys
+    {
+        public static PROPERTYKEY AppUserModelId => new()
+        {
+            fmtid = new Guid("9F4C2855-9F79-4B39-A8D0-E1D42DE1D5F3F"),
+            pid = 5
+        };
+    }
+
+    [ComImport]
+    [Guid("886D8EEB-8CF2-4446-8D02-CDBA1DBDCF99")]
+    [InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+    private interface IPropertyStore
+    {
+        void GetCount(out uint propertyCount);
+        void GetAt(uint propertyIndex, out PROPERTYKEY key);
+        void GetValue(ref PROPERTYKEY key, out PROPVARIANT value);
+        void SetValue(ref PROPERTYKEY key, ref PROPVARIANT value);
+        void Commit();
+    }
+
+    [StructLayout(LayoutKind.Sequential, Pack = 4)]
+    private struct PROPERTYKEY
+    {
+        public Guid fmtid;
+        public uint pid;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct PROPVARIANT
+    {
+        private ushort vt;
+        private ushort reserved1;
+        private ushort reserved2;
+        private ushort reserved3;
+        private IntPtr value;
+        private IntPtr value2;
+
+        public string? GetString()
+        {
+            const ushort vtLpwstr = 31;
+            return vt == vtLpwstr && value != IntPtr.Zero ? Marshal.PtrToStringUni(value) : null;
+        }
+    }
 
     [ComImport]
     [Guid("46EB5926-582E-4017-9FDF-E8998DAA0950")]

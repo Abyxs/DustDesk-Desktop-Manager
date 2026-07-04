@@ -9,8 +9,6 @@ $ErrorActionPreference = "Stop"
 $scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 $root = Resolve-Path (Join-Path $scriptDir "..")
 $projectPath = Join-Path $root "DustDesk.csproj"
-$mainFormPath = Join-Path $root "MainForm.cs"
-
 if (-not (Test-Path -LiteralPath $projectPath)) {
     throw "Project file not found: $projectPath"
 }
@@ -22,13 +20,10 @@ if ([string]::IsNullOrWhiteSpace($assemblyName)) {
 }
 
 if ([string]::IsNullOrWhiteSpace($Version)) {
-    $mainFormText = Get-Content -LiteralPath $mainFormPath -Raw
-    $match = [regex]::Match($mainFormText, 'v(?<version>\d+\.\d+\.\d+)')
-    if (-not $match.Success) {
-        throw "Version was not provided and could not be read from MainForm.cs."
+    $Version = $projectXml.Project.PropertyGroup.Version
+    if ([string]::IsNullOrWhiteSpace($Version)) {
+        throw "Version was not provided and could not be read from DustDesk.csproj."
     }
-
-    $Version = $match.Groups["version"].Value
 }
 
 $packageName = "$assemblyName.$Version"
