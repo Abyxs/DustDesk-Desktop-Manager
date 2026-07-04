@@ -14269,19 +14269,26 @@ internal static class DesktopOrganizerStorage
             return null;
         }
 
+        source = NormalizePath(source);
         var target = GetDesktopTargetPath(source);
         if (!File.Exists(source) && !Directory.Exists(source))
         {
-            RemoveOrganizerReferences(config, source, target);
-            return !string.IsNullOrWhiteSpace(target) && (File.Exists(target) || Directory.Exists(target)) ? target : null;
+            if (!string.IsNullOrWhiteSpace(target) && PathExists(target))
+            {
+                RemoveOrganizerReferences(config, source);
+                return target;
+            }
+
+            return null;
         }
 
-        if (File.Exists(source) || Directory.Exists(source))
+        target = MoveToDesktop(source);
+        if (string.IsNullOrWhiteSpace(target) || !PathExists(target))
         {
-            target = MoveToDesktop(source);
+            return null;
         }
 
-        RemoveOrganizerReferences(config, source, target);
+        RemoveOrganizerReferences(config, source);
         return target;
     }
 
@@ -14361,7 +14368,6 @@ internal static class DesktopOrganizerStorage
     public static void RemoveOrganizerReferences(AppConfig config, params string?[] paths)
     {
         var referencePaths = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-        var referenceNames = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         foreach (var path in paths)
         {
             if (string.IsNullOrWhiteSpace(path))
@@ -14370,21 +14376,16 @@ internal static class DesktopOrganizerStorage
             }
 
             referencePaths.Add(NormalizePath(path));
-            var name = Path.GetFileName(path);
-            if (!string.IsNullOrWhiteSpace(name))
-            {
-                referenceNames.Add(name);
-            }
         }
 
-        if (referencePaths.Count == 0 && referenceNames.Count == 0)
+        if (referencePaths.Count == 0)
         {
             return;
         }
 
         foreach (var category in config.DesktopCategories)
         {
-            category.ItemPaths.RemoveAll(item => IsSameDesktopEntry(item, referencePaths, referenceNames));
+            category.ItemPaths.RemoveAll(item => referencePaths.Contains(NormalizePath(item)));
         }
     }
 
@@ -14400,15 +14401,23 @@ internal static class DesktopOrganizerStorage
         {
             if (!File.Exists(path) && !Directory.Exists(path))
             {
-                RemoveOrganizerReferences(config, path);
-                continue;
+                var desktopTarget = GetDesktopTargetPath(path);
+                if (!string.IsNullOrWhiteSpace(desktopTarget) && PathExists(desktopTarget))
+                {
+                    RemoveOrganizerReferences(config, path);
+                    continue;
+                }
+
+                return false;
             }
 
             var target = MoveToDesktop(path);
-            if (!string.IsNullOrWhiteSpace(target))
+            if (string.IsNullOrWhiteSpace(target) || !PathExists(target))
             {
-                RemoveOrganizerReferences(config, path, target);
+                return false;
             }
+
+            RemoveOrganizerReferences(config, path);
         }
 
         TryDeleteEmptyDirectory(categoryDirectory);
@@ -14500,8 +14509,18 @@ internal static class DesktopOrganizerStorage
             MoveDirectory(source, target);
         }
 
+        if (!PathExists(target))
+        {
+            throw new IOException("移动后的目标路径不存在，已保留原路径记录。");
+        }
+
         NativeGlass.NotifyShellMoved(source, target, sourceWasDirectory);
         return target;
+    }
+
+    private static bool PathExists(string path)
+    {
+        return File.Exists(path) || Directory.Exists(path);
     }
 
     private static void MoveFile(string source, string target)
