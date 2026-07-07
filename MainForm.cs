@@ -3750,7 +3750,6 @@ public sealed class MainForm : Form
         void RefreshAll()
         {
             DesktopOrganizerStorage.EnsureOrganizerFileSystemReferences(_config, _store);
-            RemoveMissingDesktopCategoryItems();
             DesktopOrganizerStorage.RemoveDesktopDuplicateOrganizerReferences(_config);
             _store.SaveConfig(_config);
             canvas.RefreshData();
@@ -3760,9 +3759,20 @@ public sealed class MainForm : Form
         {
             foreach (var path in paths.Where(path => !string.IsNullOrWhiteSpace(path)).Distinct(StringComparer.OrdinalIgnoreCase))
             {
-                var target = DesktopOrganizerStorage.MoveIntoCategory(_store, category, path);
+                string? target;
+                try
+                {
+                    target = DesktopOrganizerStorage.MoveIntoCategory(_store, category, path);
+                }
+                catch (Exception ex)
+                {
+                    MessageBox.Show(this, $"添加失败：{ex.Message}", "DustDesk", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                    continue;
+                }
+
                 if (target is null)
                 {
+                    MessageBox.Show(this, "添加失败：组件中可能已有同名文件或文件夹。", "DustDesk", MessageBoxButtons.OK, MessageBoxIcon.Information);
                     continue;
                 }
 
@@ -3826,7 +3836,6 @@ public sealed class MainForm : Form
         };
         canvas.OrganizeRequested += () =>
         {
-            RemoveMissingDesktopCategoryItems();
             _store.SaveConfig(_config);
             RefreshAll();
         };
@@ -8450,6 +8459,59 @@ internal static class ConfirmationDialogs
     {
         return ConfirmDangerousActionTwice(owner, "移除组件", "移除", "这个桌面组件");
     }
+
+    public static bool ConfirmOverwriteDesktopTarget(IWin32Window owner, string? targetName)
+    {
+        using var form = new Form
+        {
+            Text = "DustDesk",
+            FormBorderStyle = FormBorderStyle.FixedDialog,
+            StartPosition = FormStartPosition.CenterParent,
+            ClientSize = new Size(420, 150),
+            MaximizeBox = false,
+            MinimizeBox = false,
+            ShowInTaskbar = false
+        };
+
+        var icon = new Label
+        {
+            Text = "!",
+            TextAlign = ContentAlignment.MiddleCenter,
+            Font = new Font("Microsoft YaHei UI", 18F, FontStyle.Bold),
+            ForeColor = Color.White,
+            BackColor = Color.FromArgb(232, 142, 36),
+            Bounds = new Rectangle(28, 32, 38, 38)
+        };
+        icon.Region = new Region(new Rectangle(0, 0, 38, 38));
+
+        var name = string.IsNullOrWhiteSpace(targetName) ? "同名文件或文件夹" : targetName;
+        var label = new Label
+        {
+            Text = $"桌面已存在“{name}”。\n覆盖会将桌面上的同名项移入回收站。",
+            AutoSize = false,
+            Bounds = new Rectangle(86, 28, 300, 54),
+            Font = new Font("Microsoft YaHei UI", 10F),
+            ForeColor = Color.FromArgb(30, 34, 40)
+        };
+
+        var overwriteButton = new Button
+        {
+            Text = "覆盖",
+            DialogResult = DialogResult.OK,
+            Bounds = new Rectangle(220, 102, 82, 32)
+        };
+        var cancelButton = new Button
+        {
+            Text = "取消",
+            DialogResult = DialogResult.Cancel,
+            Bounds = new Rectangle(314, 102, 82, 32)
+        };
+
+        form.Controls.AddRange(new Control[] { icon, label, overwriteButton, cancelButton });
+        form.AcceptButton = overwriteButton;
+        form.CancelButton = cancelButton;
+        return form.ShowDialog(owner) == DialogResult.OK;
+    }
 }
 
 internal static class NoteStyle
@@ -8982,12 +9044,13 @@ internal sealed class DesktopTodoWidgetForm : Form
     private Rectangle NormalizeScreenBounds(Rectangle bounds)
     {
         var workArea = Screen.FromRectangle(bounds).WorkingArea;
-        var width = Math.Clamp(bounds.Width, MinimumSize.Width, Math.Max(MinimumSize.Width, workArea.Width - 16));
-        var height = Math.Clamp(bounds.Height, MinimumSize.Height, Math.Max(MinimumSize.Height, workArea.Height - 16));
-        var minX = workArea.Left + 8;
-        var minY = workArea.Top + 8;
-        var maxX = Math.Max(minX, workArea.Right - width - 8);
-        var maxY = Math.Max(minY, workArea.Bottom - height - 8);
+        var inset = Math.Max(8, DeviceDpi / 12);
+        var width = Math.Clamp(bounds.Width, MinimumSize.Width, Math.Max(MinimumSize.Width, workArea.Width - inset * 2));
+        var height = Math.Clamp(bounds.Height, MinimumSize.Height, Math.Max(MinimumSize.Height, workArea.Height - inset * 2));
+        var minX = workArea.Left + inset;
+        var minY = workArea.Top + inset;
+        var maxX = Math.Max(minX, workArea.Right - width - inset);
+        var maxY = Math.Max(minY, workArea.Bottom - height - inset);
         return new Rectangle(Math.Clamp(bounds.X, minX, maxX), Math.Clamp(bounds.Y, minY, maxY), width, height);
     }
 
@@ -9448,14 +9511,15 @@ internal sealed class DesktopLauncherWidgetForm : Form
     private Rectangle NormalizeScreenBounds(Rectangle bounds)
     {
         var workArea = Screen.FromRectangle(bounds).WorkingArea;
-        var maxWidth = Math.Max(MinimumSize.Width, workArea.Width - VisibleInset * 2);
-        var maxHeight = Math.Max(MinimumSize.Height, workArea.Height - VisibleInset * 2);
+        var inset = Math.Max(VisibleInset, DeviceDpi / 12);
+        var maxWidth = Math.Max(MinimumSize.Width, workArea.Width - inset * 2);
+        var maxHeight = Math.Max(MinimumSize.Height, workArea.Height - inset * 2);
         var width = Math.Clamp(bounds.Width, MinimumSize.Width, maxWidth);
         var height = Math.Clamp(bounds.Height, MinimumSize.Height, maxHeight);
-        var minX = workArea.Left + VisibleInset;
-        var minY = workArea.Top + VisibleInset;
-        var maxX = Math.Max(minX, workArea.Right - width - VisibleInset);
-        var maxY = Math.Max(minY, workArea.Bottom - height - VisibleInset);
+        var minX = workArea.Left + inset;
+        var minY = workArea.Top + inset;
+        var maxX = Math.Max(minX, workArea.Right - width - inset);
+        var maxY = Math.Max(minY, workArea.Bottom - height - inset);
         return new Rectangle(Math.Clamp(bounds.X, minX, maxX), Math.Clamp(bounds.Y, minY, maxY), width, height);
     }
 
@@ -13243,7 +13307,7 @@ internal sealed class DesktopNoteWidgetForm : Form
         MinimumSize = ExpandedMinimumSize;
         if (_note.ImageOnly && !_view.NaturalImageSize.IsEmpty)
         {
-            SetScreenBounds(new Rectangle(_screenBounds.Location, _view.NaturalImageSize));
+            SetScreenBounds(NormalizeScreenBounds(new Rectangle(_screenBounds.Location, _view.NaturalImageSize)));
         }
     }
 
@@ -13293,7 +13357,7 @@ internal sealed class DesktopNoteWidgetForm : Form
         _view.RefreshNote();
         if (_note.ImageOnly && !_view.NaturalImageSize.IsEmpty)
         {
-            SetScreenBounds(new Rectangle(_screenBounds.Location, _view.NaturalImageSize));
+            SetScreenBounds(NormalizeScreenBounds(new Rectangle(_screenBounds.Location, _view.NaturalImageSize)));
         }
 
         Invalidate(true);
@@ -13345,12 +13409,12 @@ internal sealed class DesktopNoteWidgetForm : Form
             if (placement is not null && placement.Width > 0 && placement.Height > 0)
             {
                 var height = _collapsed ? CollapsedHeight : Math.Max(ExpandedMinimumSize.Height, placement.Height);
-                SetScreenBounds(new Rectangle(placement.X, placement.Y, Math.Max(MinimumSize.Width, placement.Width), height));
+                SetScreenBounds(NormalizeScreenBounds(new Rectangle(placement.X, placement.Y, Math.Max(MinimumSize.Width, placement.Width), height)));
                 return;
             }
 
             var workArea = Screen.PrimaryScreen?.WorkingArea ?? new Rectangle(0, 0, 1280, 720);
-            SetScreenBounds(new Rectangle(Math.Max(workArea.Left + 40, workArea.Right - Width - 80), workArea.Top + 140, Width, Height));
+            SetScreenBounds(NormalizeScreenBounds(new Rectangle(Math.Max(workArea.Left + 40, workArea.Right - Width - 80), workArea.Top + 140, Width, Height)));
         }
         finally
         {
@@ -13368,7 +13432,7 @@ internal sealed class DesktopNoteWidgetForm : Form
         _restoringPlacement = true;
         try
         {
-            SetScreenBounds(_screenBounds);
+            SetScreenBounds(NormalizeScreenBounds(_screenBounds));
         }
         finally
         {
@@ -13434,7 +13498,7 @@ internal sealed class DesktopNoteWidgetForm : Form
             var height = _collapsed
                 ? CollapsedHeight
                 : Math.Max(ExpandedMinimumSize.Height, _placement?.ExpandedHeight > CollapsedHeight ? _placement.ExpandedHeight : 300);
-            SetScreenBounds(new Rectangle(current.X, current.Y, width, height));
+            SetScreenBounds(NormalizeScreenBounds(new Rectangle(current.X, current.Y, width, height)));
         }
 
         if (save)
@@ -13504,7 +13568,7 @@ internal sealed class DesktopNoteWidgetForm : Form
                 _manualDragStartBounds.Y + dy,
                 _manualDragStartBounds.Width,
                 _manualDragStartBounds.Height);
-        SetScreenBounds(bounds);
+        SetScreenBounds(NormalizeScreenBounds(bounds));
     }
 
     private void StopManualDrag(bool save)
@@ -13534,7 +13598,22 @@ internal sealed class DesktopNoteWidgetForm : Form
             _placement.IsCollapsed = _collapsed;
         }
 
-        _placementChanged(_note, _screenBounds.Width > 0 && _screenBounds.Height > 0 ? _screenBounds : Bounds);
+        _placementChanged(_note, NormalizeScreenBounds(_screenBounds.Width > 0 && _screenBounds.Height > 0 ? _screenBounds : Bounds));
+    }
+
+    private Rectangle NormalizeScreenBounds(Rectangle bounds)
+    {
+        var workArea = Screen.FromRectangle(bounds).WorkingArea;
+        var inset = Math.Max(8, DeviceDpi / 12);
+        var maxWidth = Math.Max(MinimumSize.Width, workArea.Width - inset * 2);
+        var maxHeight = Math.Max(MinimumSize.Height, workArea.Height - inset * 2);
+        var width = Math.Clamp(bounds.Width, MinimumSize.Width, maxWidth);
+        var height = Math.Clamp(bounds.Height, MinimumSize.Height, maxHeight);
+        var minX = workArea.Left + inset;
+        var minY = workArea.Top + inset;
+        var maxX = Math.Max(minX, workArea.Right - width - inset);
+        var maxY = Math.Max(minY, workArea.Bottom - height - inset);
+        return new Rectangle(Math.Clamp(bounds.X, minX, maxX), Math.Clamp(bounds.Y, minY, maxY), width, height);
     }
 
 }
@@ -14262,7 +14341,12 @@ internal sealed class ResizeGripControl : Control
 
 internal static class DesktopOrganizerStorage
 {
-    public static string? MoveToDesktopAndRemove(AppConfig config, string source)
+    public static string? GetDesktopTargetPathForSync(string source)
+    {
+        return string.IsNullOrWhiteSpace(source) ? null : GetDesktopTargetPath(NormalizePath(source));
+    }
+
+    public static string? MoveToDesktopAndRemove(AppConfig config, string source, bool overwriteTarget = false)
     {
         if (string.IsNullOrWhiteSpace(source))
         {
@@ -14282,7 +14366,7 @@ internal static class DesktopOrganizerStorage
             return null;
         }
 
-        target = MoveToDesktop(source);
+        target = MoveToDesktop(source, overwriteTarget);
         if (string.IsNullOrWhiteSpace(target) || !PathExists(target))
         {
             return null;
@@ -14339,30 +14423,7 @@ internal static class DesktopOrganizerStorage
 
     public static bool RemoveDesktopDuplicateOrganizerReferences(AppConfig config)
     {
-        var organizerNames = config.DesktopCategories
-            .SelectMany(category => category.ItemPaths)
-            .Where(path => File.Exists(path) || Directory.Exists(path))
-            .Select(Path.GetFileName)
-            .Where(name => !string.IsNullOrWhiteSpace(name))
-            .ToHashSet(StringComparer.OrdinalIgnoreCase);
-        if (organizerNames.Count == 0)
-        {
-            return false;
-        }
-
-        var removedDuplicates = false;
-        foreach (var desktopPath in GetDesktopEntryPaths())
-        {
-            var name = Path.GetFileName(desktopPath);
-            if (!string.IsNullOrWhiteSpace(name)
-                && organizerNames.Contains(name)
-                && TryRecycleDesktopDuplicate(desktopPath))
-            {
-                removedDuplicates = true;
-            }
-        }
-
-        return removedDuplicates;
+        return false;
     }
 
     public static void RemoveOrganizerReferences(AppConfig config, params string?[] paths)
@@ -14449,13 +14510,14 @@ internal static class DesktopOrganizerStorage
         if (!string.Equals(source, NormalizePath(target), StringComparison.OrdinalIgnoreCase)
             && (File.Exists(target) || Directory.Exists(target)))
         {
+            LogMoveFailure("MoveIntoCategory", source, target, null, "目标路径已存在。");
             return null;
         }
 
         return MoveToAvailablePath(source, target);
     }
 
-    public static string? MoveToDesktop(string source)
+    public static string? MoveToDesktop(string source, bool overwriteTarget = false)
     {
         if (string.IsNullOrWhiteSpace(source) || (!File.Exists(source) && !Directory.Exists(source)))
         {
@@ -14472,7 +14534,16 @@ internal static class DesktopOrganizerStorage
         {
             if (File.Exists(target) || Directory.Exists(target))
             {
-                return null;
+                if (!overwriteTarget)
+                {
+                    LogMoveFailure("MoveToDesktop", source, target, null, "目标路径已存在。");
+                    return null;
+                }
+
+                if (!TryRecycleDesktopDuplicate(target))
+                {
+                    throw new IOException("桌面同名文件或文件夹无法覆盖，可能正在被占用。已取消移动并保留原文件。");
+                }
             }
         }
 
@@ -14500,18 +14571,28 @@ internal static class DesktopOrganizerStorage
             return source;
         }
 
-        if (File.Exists(source))
+        try
         {
-            MoveFile(source, target);
-        }
-        else
-        {
-            MoveDirectory(source, target);
-        }
+            if (File.Exists(source))
+            {
+                EnsureFileIsMovable(source);
+                MoveFile(source, target);
+            }
+            else
+            {
+                EnsureDirectoryIsMovable(source);
+                MoveDirectory(source, target);
+            }
 
-        if (!PathExists(target))
+            if (!PathExists(target))
+            {
+                throw new IOException("移动后的目标路径不存在，已保留原路径记录。");
+            }
+        }
+        catch (Exception ex)
         {
-            throw new IOException("移动后的目标路径不存在，已保留原路径记录。");
+            LogMoveFailure("Move", source, target, ex);
+            throw CreateMoveFailedException(source, sourceWasDirectory, ex);
         }
 
         NativeGlass.NotifyShellMoved(source, target, sourceWasDirectory);
@@ -14525,17 +14606,7 @@ internal static class DesktopOrganizerStorage
 
     private static void MoveFile(string source, string target)
     {
-        try
-        {
-            File.Move(source, target);
-            return;
-        }
-        catch (IOException)
-        {
-        }
-
-        File.Copy(source, target, overwrite: false);
-        File.Delete(source);
+        File.Move(source, target);
     }
 
     private static void MoveDirectory(string source, string target)
@@ -14545,22 +14616,40 @@ internal static class DesktopOrganizerStorage
             Directory.Move(source, target);
             return;
         }
-        catch (IOException)
+        catch (IOException ex) when (!string.Equals(Path.GetPathRoot(source), Path.GetPathRoot(target), StringComparison.OrdinalIgnoreCase))
         {
+            MoveDirectoryAcrossVolumes(source, target, ex);
+        }
+        catch (IOException ex)
+        {
+            throw new IOException("文件夹中有文件或应用正在运行，请关闭后再操作。已取消移动并保留原文件夹。", ex);
+        }
+        catch (UnauthorizedAccessException ex)
+        {
+            throw new IOException("文件夹中有文件或应用正在运行，或没有访问权限。已取消移动并保留原文件夹。", ex);
+        }
+    }
+
+    private static void MoveDirectoryAcrossVolumes(string source, string target, Exception originalException)
+    {
+        var parent = Path.GetDirectoryName(target);
+        if (string.IsNullOrWhiteSpace(parent))
+        {
+            throw originalException;
         }
 
+        Directory.CreateDirectory(parent);
+        var tempTarget = Path.Combine(parent, $".moving-{Guid.NewGuid():N}.tmp");
         try
         {
-            CopyDirectory(source, target);
-            Directory.Delete(source, recursive: true);
+            CopyDirectory(source, tempTarget);
+            EnsureDirectoryCopyComplete(source, tempTarget);
+            Directory.Move(tempTarget, target);
+            RecycleDirectory(source);
         }
         catch
         {
-            if (Directory.Exists(target))
-            {
-                Directory.Delete(target, recursive: true);
-            }
-
+            TryDeleteDirectory(tempTarget);
             throw;
         }
     }
@@ -14577,6 +14666,100 @@ internal static class DesktopOrganizerStorage
         {
             CopyDirectory(directory, Path.Combine(target, Path.GetFileName(directory)));
         }
+    }
+
+    private static void EnsureDirectoryCopyComplete(string source, string target)
+    {
+        foreach (var sourcePath in Directory.EnumerateFileSystemEntries(source, "*", SearchOption.AllDirectories))
+        {
+            var relativePath = Path.GetRelativePath(source, sourcePath);
+            var targetPath = Path.Combine(target, relativePath);
+            if (File.Exists(sourcePath))
+            {
+                if (!File.Exists(targetPath) || new FileInfo(sourcePath).Length != new FileInfo(targetPath).Length)
+                {
+                    throw new IOException("跨盘复制校验失败，已取消移动并保留原文件夹。");
+                }
+            }
+            else if (Directory.Exists(sourcePath) && !Directory.Exists(targetPath))
+            {
+                throw new IOException("跨盘复制校验失败，已取消移动并保留原文件夹。");
+            }
+        }
+    }
+
+    private static void EnsureDirectoryIsMovable(string source)
+    {
+        try
+        {
+            foreach (var file in Directory.EnumerateFiles(source, "*", SearchOption.AllDirectories))
+            {
+                EnsureFileIsMovable(file);
+            }
+        }
+        catch (Exception ex) when (ex is UnauthorizedAccessException or IOException)
+        {
+            throw new IOException("文件夹中有文件正在被占用或无法访问，已取消移动并保留原文件夹。", ex);
+        }
+    }
+
+    private static void EnsureFileIsMovable(string source)
+    {
+        try
+        {
+            using var stream = new FileStream(source, FileMode.Open, FileAccess.Read, FileShare.None);
+        }
+        catch (Exception ex) when (ex is UnauthorizedAccessException or IOException)
+        {
+            throw new IOException($"文件正在被占用，已取消移动：{Path.GetFileName(source)}", ex);
+        }
+    }
+
+    private static Exception CreateMoveFailedException(string source, bool sourceWasDirectory, Exception exception)
+    {
+        if (exception is IOException or UnauthorizedAccessException)
+        {
+            var message = sourceWasDirectory
+                ? "文件夹中有文件或应用正在运行，请关闭后再操作。已取消移动并保留原文件夹。"
+                : $"文件正在被占用，请关闭后再操作：{Path.GetFileName(source)}";
+            return new IOException(message, exception);
+        }
+
+        return exception;
+    }
+
+    private static void LogMoveFailure(string operation, string source, string? target, Exception? exception, string? reason = null)
+    {
+        var message =
+            $"Operation: {operation}\r\nSource: {source}\r\nTarget: {target ?? string.Empty}\r\nReason: {reason ?? string.Empty}";
+        AppLog.WriteException("organizer-move.log", exception ?? new IOException(reason ?? "移动失败。"), message);
+    }
+
+    private static void TryDeleteDirectory(string directory)
+    {
+        try
+        {
+            if (Directory.Exists(directory))
+            {
+                Directory.Delete(directory, recursive: true);
+            }
+        }
+        catch
+        {
+        }
+    }
+
+    private static void RecycleDirectory(string directory)
+    {
+        if (!Directory.Exists(directory))
+        {
+            return;
+        }
+
+        Microsoft.VisualBasic.FileIO.FileSystem.DeleteDirectory(
+            directory,
+            Microsoft.VisualBasic.FileIO.UIOption.OnlyErrorDialogs,
+            Microsoft.VisualBasic.FileIO.RecycleOption.SendToRecycleBin);
     }
 
     private static void TryDeleteEmptyDirectory(string directory)
@@ -15521,9 +15704,20 @@ internal sealed class DesktopOrganizerWidgetForm : Form
             return;
         }
 
-        var target = DesktopOrganizerStorage.MoveIntoCategory(_store, category, path);
+        string? target;
+        try
+        {
+            target = DesktopOrganizerStorage.MoveIntoCategory(_store, category, path);
+        }
+        catch (Exception ex)
+        {
+            MessageBox.Show(this, $"添加失败：{ex.Message}", "DustDesk", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+            return;
+        }
+
         if (target is null)
         {
+            MessageBox.Show(this, "添加失败：组件中可能已有同名文件或文件夹。", "DustDesk", MessageBoxButtons.OK, MessageBoxIcon.Information);
             return;
         }
 
@@ -15537,17 +15731,38 @@ internal sealed class DesktopOrganizerWidgetForm : Form
         RefreshList();
     }
 
-    private void MovePathOutFromWidget(string path)
+    private void MovePathOutFromWidget(string path, bool syncExternalMoveOnly)
     {
         if (string.IsNullOrWhiteSpace(path))
         {
             return;
         }
 
+        if (syncExternalMoveOnly)
+        {
+            if (!SyncExternalDesktopMove(path))
+            {
+                RefreshList();
+            }
+
+            return;
+        }
+
+        var overwriteTarget = false;
+        var desktopTarget = DesktopOrganizerStorage.GetDesktopTargetPathForSync(path);
+        if (!string.IsNullOrWhiteSpace(desktopTarget) && (File.Exists(desktopTarget) || Directory.Exists(desktopTarget)))
+        {
+            overwriteTarget = ConfirmationDialogs.ConfirmOverwriteDesktopTarget(this, Path.GetFileName(desktopTarget));
+            if (!overwriteTarget)
+            {
+                return;
+            }
+        }
+
         string? target;
         try
         {
-            target = DesktopOrganizerStorage.MoveToDesktopAndRemove(_config, path);
+            target = DesktopOrganizerStorage.MoveToDesktopAndRemove(_config, path, overwriteTarget);
         }
         catch (Exception ex)
         {
@@ -15563,6 +15778,31 @@ internal sealed class DesktopOrganizerWidgetForm : Form
 
         _store.SaveConfig(_config);
         RefreshList();
+    }
+
+    private bool SyncExternalDesktopMove(string path)
+    {
+        var desktopTarget = DesktopOrganizerStorage.GetDesktopTargetPathForSync(path);
+        if (string.IsNullOrWhiteSpace(desktopTarget))
+        {
+            return false;
+        }
+
+        for (var attempt = 0; attempt < 80; attempt++)
+        {
+            if (!File.Exists(path) && !Directory.Exists(path) && (File.Exists(desktopTarget) || Directory.Exists(desktopTarget)))
+            {
+                DesktopOrganizerStorage.RemoveOrganizerReferences(_config, path);
+                _store.SaveConfig(_config);
+                RefreshList();
+                return true;
+            }
+
+            Application.DoEvents();
+            Thread.Sleep(100);
+        }
+
+        return false;
     }
 
     private static string GetUniquePath(string path)
@@ -16092,7 +16332,7 @@ internal sealed class DesktopOrganizerWidgetView : Control
     public event Action<DesktopOrganizerMergeTarget>? MergeRequested;
     public event Action? SkinChangedRequested;
     public event Action<DeskCategory, string, int?>? PathDroppedRequested;
-    public event Action<string>? PathRemovedRequested;
+    public event Action<string, bool>? PathRemovedRequested;
     public event Action<string>? OpenRequested;
     public event Action? ReorderRequested;
     public event Action? HideRequested;
@@ -16689,7 +16929,7 @@ internal sealed class DesktopOrganizerWidgetView : Control
                 OpenRequested?.Invoke(path);
                 break;
             case "move":
-                PathRemovedRequested?.Invoke(path);
+                PathRemovedRequested?.Invoke(path, false);
                 break;
             case "refresh":
                 RefreshRequested?.Invoke();
@@ -17341,17 +17581,28 @@ internal sealed class DesktopOrganizerWidgetView : Control
         Capture = false;
         var data = new DataObject();
         data.SetData(DataFormats.Text, path);
+        var dragDirectory = Directory.Exists(path);
+        if (!dragDirectory)
+        {
+            data.SetData(DataFormats.FileDrop, new[] { path });
+        }
         _activeDraggedItemPath = path;
         _handledActiveDraggedItemDrop = false;
         data.SetData(DustDeskDragData.LauncherCopyHandledFormat, new Action(() => _handledActiveDraggedItemDrop = true));
         using var preview = new DragPreviewForm(path);
+        var dragForm = FindForm();
         void MovePreview() => preview.MoveToCursor(Cursor.Position);
+        var dragCancelled = false;
         GiveFeedbackEventHandler giveFeedback = (_, e) =>
         {
             e.UseDefaultCursors = true;
             MovePreview();
         };
-        QueryContinueDragEventHandler queryContinue = (_, _) => MovePreview();
+        QueryContinueDragEventHandler queryContinue = (_, e) =>
+        {
+            dragCancelled = e.Action == DragAction.Cancel;
+            MovePreview();
+        };
 
         try
         {
@@ -17360,16 +17611,20 @@ internal sealed class DesktopOrganizerWidgetView : Control
             GiveFeedback += giveFeedback;
             QueryContinueDrag += queryContinue;
             var effect = DoDragDrop(data, DragDropEffects.Move);
-            if (effect != DragDropEffects.None)
+            if (dragDirectory)
+            {
+                var droppedOutsideWidget = dragForm is null || !dragForm.Bounds.Contains(Cursor.Position);
+                if (!dragCancelled && droppedOutsideWidget && !_handledActiveDraggedItemDrop)
+                {
+                    PathRemovedRequested?.Invoke(path, false);
+                }
+            }
+            else if (effect != DragDropEffects.None)
             {
                 if (!_handledActiveDraggedItemDrop)
                 {
-                    PathRemovedRequested?.Invoke(path);
+                    PathRemovedRequested?.Invoke(path, true);
                 }
-            }
-            else if (!_handledActiveDraggedItemDrop)
-            {
-                PathRemovedRequested?.Invoke(path);
             }
         }
         finally
@@ -17456,7 +17711,7 @@ internal sealed class DesktopOrganizerWidgetView : Control
             }
             else
             {
-                PathRemovedRequested?.Invoke(path);
+                PathRemovedRequested?.Invoke(path, false);
             }
         }
 
@@ -21359,6 +21614,14 @@ internal sealed class SettingsPageCanvas : Control
         _versionScrollOffset = Math.Max(0, _versionScrollOffset);
         var y = content.Y - _versionScrollOffset;
 
+        DrawVersionSection(g, content, "1.8.0 更新记录", new[]
+        {
+            "重构桌面收纳文件移动逻辑，移动失败时不再复制后删除源文件，避免文件夹内容丢失。",
+            "拖入文件夹前会检测占用文件；有文件或应用正在运行时提示关闭后再操作，并保留原文件夹。",
+            "修复空文件夹或文件夹从组件拖出后消失、无反应、位置异常的问题。",
+            "移到桌面遇到同名项时改为“覆盖 / 取消”，覆盖会先把桌面同名项移入回收站。",
+            "移除自动回收桌面同名项逻辑，避免失败残留目录导致原桌面文件夹被误删。"
+        }, content.X, ref y, content.Width);
         DrawVersionSection(g, content, "1.7.0 更新记录", new[]
         {
             "桌面收纳遇到同名文件或文件夹时直接拒绝移动，不覆盖、不自动改名。",
@@ -23268,7 +23531,6 @@ internal sealed class DesktopPageCanvas : Control
         _selectedCategory = _selectedCategory is not null && _config.DesktopCategories.Contains(_selectedCategory)
             ? _selectedCategory
             : _config.DesktopCategories.FirstOrDefault();
-        RemoveMissingCategoryItems();
         RefreshDesktopPaths();
         RefreshCategoryPaths();
         _selectedDesktopPaths.RemoveWhere(path => !_desktopPaths.Contains(path, StringComparer.OrdinalIgnoreCase));
@@ -26001,7 +26263,7 @@ internal static class ShellIconLoader
     private const int ShilExtraLarge = 0x2;
     private const int ShilJumbo = 0x4;
     private const int IldTransparent = 0x1;
-    private const int PreferredIconSize = 64;
+    private const int PreferredIconSize = 256;
     private const int MaxPath = 260;
     private const uint DiNormal = 0x0003;
     private const string AppxManifestFileName = "AppxManifest.xml";
@@ -26192,6 +26454,14 @@ internal static class ShellIconLoader
             {
                 target = TryGetShellLinkTargetParsingPath(shortcutPath) ?? string.Empty;
             }
+
+            image = LoadShellImageListIcon(shortcutPath);
+            if (image is not null && !IsProbablyBlankGenericIcon(image))
+            {
+                return true;
+            }
+            image?.Dispose();
+            image = null;
 
             if (TryLoadPackagedAppIcon(target, out image))
             {
@@ -26930,10 +27200,11 @@ internal static class ShellIconLoader
     {
         try
         {
-            var bounds = FindVisibleContentBounds(source);
+            var preparedSource = RemoveDarkOuterOutline(RemoveTransparentEdgeFringe(source));
+            var bounds = FindVisibleContentBounds(preparedSource);
             if (bounds.IsEmpty)
             {
-                return new Bitmap(source);
+                return preparedSource;
             }
 
             var contentCoverage = Math.Max(bounds.Width / (float)source.Width, bounds.Height / (float)source.Height);
@@ -26943,7 +27214,7 @@ internal static class ShellIconLoader
                 : new Rectangle(0, 0, source.Width, source.Height);
             if (!contentIsUndersized && source.Width == targetSize && source.Height == targetSize)
             {
-                return new Bitmap(source);
+                return preparedSource;
             }
 
             var padding = contentIsUndersized ? Math.Max(2, targetSize / 16) : 0;
@@ -26958,7 +27229,8 @@ internal static class ShellIconLoader
             graphics.InterpolationMode = InterpolationMode.HighQualityBicubic;
             graphics.CompositingQuality = CompositingQuality.HighQuality;
             graphics.PixelOffsetMode = PixelOffsetMode.HighQuality;
-            graphics.DrawImage(source, target, sourceBounds, GraphicsUnit.Pixel);
+            graphics.DrawImage(preparedSource, target, sourceBounds, GraphicsUnit.Pixel);
+            preparedSource.Dispose();
             return result;
         }
         finally
@@ -26968,6 +27240,173 @@ internal static class ShellIconLoader
                 source.Dispose();
             }
         }
+    }
+
+    private static Bitmap RemoveTransparentEdgeFringe(Bitmap source)
+    {
+        var result = new Bitmap(source.Width, source.Height, System.Drawing.Imaging.PixelFormat.Format32bppArgb);
+        using (var graphics = Graphics.FromImage(result))
+        {
+            graphics.DrawImageUnscaled(source, 0, 0);
+        }
+
+        for (var y = 0; y < result.Height; y++)
+        {
+            for (var x = 0; x < result.Width; x++)
+            {
+                var pixel = result.GetPixel(x, y);
+                if (pixel.A > 24)
+                {
+                    continue;
+                }
+
+                var replacement = FindNearestVisibleColor(result, x, y);
+                if (replacement.HasValue)
+                {
+                    result.SetPixel(x, y, Color.FromArgb(pixel.A, replacement.Value.R, replacement.Value.G, replacement.Value.B));
+                }
+            }
+        }
+
+        return result;
+    }
+
+    private static Color? FindNearestVisibleColor(Bitmap bitmap, int x, int y)
+    {
+        const int radius = 3;
+        for (var distance = 1; distance <= radius; distance++)
+        {
+            for (var yy = Math.Max(0, y - distance); yy <= Math.Min(bitmap.Height - 1, y + distance); yy++)
+            {
+                for (var xx = Math.Max(0, x - distance); xx <= Math.Min(bitmap.Width - 1, x + distance); xx++)
+                {
+                    if (Math.Max(Math.Abs(xx - x), Math.Abs(yy - y)) != distance)
+                    {
+                        continue;
+                    }
+
+                    var candidate = bitmap.GetPixel(xx, yy);
+                    if (candidate.A > 96)
+                    {
+                        return candidate;
+                    }
+                }
+            }
+        }
+
+        return null;
+    }
+
+    private static Bitmap RemoveDarkOuterOutline(Bitmap source)
+    {
+        var opaque = 0;
+        var dark = 0;
+        for (var y = 0; y < source.Height; y++)
+        {
+            for (var x = 0; x < source.Width; x++)
+            {
+                var pixel = source.GetPixel(x, y);
+                if (pixel.A <= 96)
+                {
+                    continue;
+                }
+
+                opaque++;
+                if (IsDarkOutlinePixel(pixel))
+                {
+                    dark++;
+                }
+            }
+        }
+
+        if (opaque == 0 || dark / (float)opaque > 0.45F)
+        {
+            return source;
+        }
+
+        var result = new Bitmap(source);
+        for (var pass = 0; pass < 5; pass++)
+        {
+            var remove = new List<Point>();
+            for (var y = 0; y < result.Height; y++)
+            {
+                for (var x = 0; x < result.Width; x++)
+                {
+                    var pixel = result.GetPixel(x, y);
+                    if (pixel.A <= 18
+                        || !IsDarkOutlinePixel(pixel)
+                        || !TouchesTransparentPixel(result, x, y)
+                        || !HasNearbyColoredInterior(result, x, y))
+                    {
+                        continue;
+                    }
+
+                    remove.Add(new Point(x, y));
+                }
+            }
+
+            if (remove.Count == 0)
+            {
+                break;
+            }
+
+            foreach (var point in remove)
+            {
+                result.SetPixel(point.X, point.Y, Color.Transparent);
+            }
+        }
+
+        source.Dispose();
+        return result;
+    }
+
+    private static bool IsDarkOutlinePixel(Color color)
+    {
+        return color.GetBrightness() < 0.46F && color.GetSaturation() < 0.52F;
+    }
+
+    private static bool HasNearbyColoredInterior(Bitmap bitmap, int x, int y)
+    {
+        const int radius = 5;
+        for (var yy = Math.Max(0, y - radius); yy <= Math.Min(bitmap.Height - 1, y + radius); yy++)
+        {
+            for (var xx = Math.Max(0, x - radius); xx <= Math.Min(bitmap.Width - 1, x + radius); xx++)
+            {
+                if (xx == x && yy == y)
+                {
+                    continue;
+                }
+
+                var pixel = bitmap.GetPixel(xx, yy);
+                if (pixel.A > 128 && !IsDarkOutlinePixel(pixel) && pixel.GetSaturation() > 0.35F)
+                {
+                    return true;
+                }
+            }
+        }
+
+        return false;
+    }
+
+    private static bool TouchesTransparentPixel(Bitmap bitmap, int x, int y)
+    {
+        for (var yy = Math.Max(0, y - 1); yy <= Math.Min(bitmap.Height - 1, y + 1); yy++)
+        {
+            for (var xx = Math.Max(0, x - 1); xx <= Math.Min(bitmap.Width - 1, x + 1); xx++)
+            {
+                if (xx == x && yy == y)
+                {
+                    continue;
+                }
+
+                if (bitmap.GetPixel(xx, yy).A <= 24)
+                {
+                    return true;
+                }
+            }
+        }
+
+        return false;
     }
 
     private static Rectangle FindVisibleContentBounds(Bitmap bitmap)
