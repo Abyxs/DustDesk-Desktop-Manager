@@ -5,7 +5,7 @@ namespace DustDesk;
 internal static class Program
 {
     [STAThread]
-    private static void Main()
+    private static void Main(string[] args)
     {
         using var singleInstance = new Mutex(initiallyOwned: true, "Global\\DustDesk.SingleInstance", out var createdNew);
         if (!createdNew)
@@ -25,7 +25,17 @@ internal static class Program
                 LogUnhandledException(exception);
             }
         };
-        Application.Run(new MainForm());
+        var startedByWindows = args.Any(arg => string.Equals(arg, "--autostart", StringComparison.OrdinalIgnoreCase));
+        using var mainForm = new MainForm(startedByWindows);
+        if (mainForm.StartHiddenAtLaunch)
+        {
+            mainForm.InitializeHiddenStartup();
+            Application.Run();
+        }
+        else
+        {
+            Application.Run(mainForm);
+        }
     }
 
     private static void LogUnhandledException(Exception exception)

@@ -7,6 +7,8 @@ public sealed class AppConfig
     public string MainWindowDisplayName { get; set; } = "";
     public bool DesktopWidgetTransparent { get; set; } = true;
     public int DesktopWidgetOpacity { get; set; } = 35;
+    public int? DesktopWidgetBorderColorArgb { get; set; }
+    public bool DesktopWidgetAutoHideMenuIcon { get; set; }
     public bool DesktopOrganizerShowNames { get; set; }
     public int DesktopOrganizerIconSize { get; set; } = 48;
     public bool DesktopTodoWidgetTransparent { get; set; } = true;
@@ -75,6 +77,9 @@ public class WidgetPlacement
     public bool IsCollapsed { get; set; }
     public int ExpandedWidth { get; set; }
     public int ExpandedHeight { get; set; }
+    public int? AppearanceOpacityPercent { get; set; }
+    public int? AppearanceBorderColorArgb { get; set; }
+    public bool? AppearanceAutoHideMenuIcon { get; set; }
 }
 
 public sealed class DesktopNoteWidgetPlacement : WidgetPlacement

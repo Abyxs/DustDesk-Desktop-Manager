@@ -46,6 +46,8 @@ public sealed class MainForm : Form
     private const int WsMinimizeBox = 0x00020000;
     private const int WmHotKey = 0x0312;
     private const int WmClipboardUpdate = 0x031D;
+    private const int WmMouseMove = 0x0200;
+    private const int WmLeftButtonDown = 0x0201;
     private const int MainWindowHotKeyId = 0x4444;
     private const int DesktopOrganizerHotKeyId = 0x4445;
     private const int MaxClipboardHistoryItems = 100;
@@ -109,6 +111,9 @@ public sealed class MainForm : Form
     private bool _closingApp;
     private bool _exitRequested;
     private bool _isCheckingForUpdates;
+    private readonly bool _startHiddenAtLaunch;
+    private bool _startupWorkScheduled;
+    private bool _restoringDesktopWidgets;
 
     private static readonly Color BackColorMain = Color.FromArgb(22, 30, 42);
     private static readonly Color PanelColor = Color.FromArgb(46, 56, 72);
@@ -118,7 +123,7 @@ public sealed class MainForm : Form
     private static readonly Color TextColorSubtle = Color.FromArgb(155, 168, 186);
     private static readonly Color AccentColor = Color.FromArgb(35, 107, 238);
 
-    public MainForm()
+    public MainForm(bool startedByWindows = false)
     {
         Text = "DustDesk";
         FormBorderStyle = FormBorderStyle.None;
@@ -136,7 +141,10 @@ public sealed class MainForm : Form
         _hotKeyWindow = new HotKeyMessageWindow(HandleGlobalHotKey);
 
         _config = _store.LoadConfig();
+        _startHiddenAtLaunch = startedByWindows || _config.StartHiddenToTray;
         DesktopWidgetStyle.OpacityPercent = _config.DesktopWidgetOpacity;
+        DesktopWidgetStyle.BorderColorArgb = _config.DesktopWidgetBorderColorArgb ?? Color.White.ToArgb();
+        DesktopWidgetStyle.AutoHideMenuIcon = _config.DesktopWidgetAutoHideMenuIcon;
         DesktopWidgetStyle.OpacityChanged += HandleDesktopWidgetOpacityChanged;
         var configChanged = EnsureDesktopWidgetsTransparent();
         configChanged |= DesktopOrganizerStorage.EnsureOrganizerFileSystemReferences(_config, _store);
@@ -165,16 +173,30 @@ public sealed class MainForm : Form
         LoadMenuIcons();
         BuildShell();
         ShowPage(0);
-        RestoreDesktopWidgets();
         _resizeFilter = new ResizeMessageFilter(this);
         Application.AddMessageFilter(_resizeFilter);
-        if (_config.StartHiddenToTray)
+        Shown += (_, _) => ScheduleStartupWork();
+    }
+
+    public bool StartHiddenAtLaunch => _startHiddenAtLaunch;
+
+    public void InitializeHiddenStartup()
+    {
+        _ = Handle;
+        BeginInvoke(new Action(ScheduleStartupWork));
+    }
+
+    private void ScheduleStartupWork()
+    {
+        if (_startupWorkScheduled)
         {
-            Shown += (_, _) => BeginInvoke(new Action(HideToTray));
+            return;
         }
 
-        Shown += (_, _) => BeginInvoke(new Action(CheckTodoReminders));
-        Shown += (_, _) => BeginInvoke(new Action(CheckForUpdatesSilently));
+        _startupWorkScheduled = true;
+        BeginInvoke(new Action(RestoreDesktopWidgets));
+        BeginInvoke(new Action(CheckTodoReminders));
+        BeginInvoke(new Action(CheckForUpdatesSilently));
     }
 
     protected override CreateParams CreateParams
@@ -192,7 +214,6 @@ public sealed class MainForm : Form
         base.OnHandleCreated(e);
         NativeGlass.ApplyDarkWindowFrame(Handle);
         _clipboardListenerRegistered = AddClipboardFormatListener(Handle);
-        BeginInvoke(new Action(CaptureClipboardSnapshot));
         RegisterMainWindowHotKey();
         RegisterDesktopOrganizerHotKey();
     }
@@ -423,6 +444,21 @@ public sealed class MainForm : Form
 
         public bool PreFilterMessage(ref Message m)
         {
+            if (m.Msg == WmMouseMove || m.Msg == WmLeftButtonDown)
+            {
+                var source = Control.FromHandle(m.HWnd);
+                var form = source?.FindForm();
+                if (IsDesktopWidgetForm(form) && form is not null)
+                {
+                    var point = form.PointToClient(Cursor.Position);
+                    if ((point.X >= form.ClientSize.Width - 80 && point.Y <= 72)
+                        || (m.Msg == WmLeftButtonDown && point.Y >= form.ClientSize.Height - 40))
+                    {
+                        DesktopWidgetStyle.ShowMenuIcon(form);
+                    }
+                }
+            }
+
             if (m.Msg != WmNchittest || _form.IsDisposed || _form.WindowState == FormWindowState.Maximized)
             {
                 return false;
@@ -459,6 +495,15 @@ public sealed class MainForm : Form
 
             return false;
         }
+
+        private static bool IsDesktopWidgetForm(Form? form) => form is DesktopOrganizerWidgetForm
+            or DesktopTodoWidgetForm
+            or DesktopNoteWidgetForm
+            or DesktopProjectWidgetForm
+            or DesktopLauncherWidgetForm
+            or DesktopSystemMonitorWidgetForm
+            or DesktopSearchWidgetForm
+            or DesktopClipboardWidgetForm;
     }
 
     private void BuildShell()
@@ -806,12 +851,18 @@ public sealed class MainForm : Form
     private void HandleDesktopWidgetOpacityChanged()
     {
         var opacity = DesktopWidgetStyle.OpacityPercent;
-        if (_config.DesktopWidgetOpacity == opacity)
+        var borderColor = DesktopWidgetStyle.BorderColorArgb;
+        var autoHideMenuIcon = DesktopWidgetStyle.AutoHideMenuIcon;
+        if (_config.DesktopWidgetOpacity == opacity
+            && _config.DesktopWidgetBorderColorArgb == borderColor
+            && _config.DesktopWidgetAutoHideMenuIcon == autoHideMenuIcon)
         {
             return;
         }
 
         _config.DesktopWidgetOpacity = opacity;
+        _config.DesktopWidgetBorderColorArgb = borderColor;
+        _config.DesktopWidgetAutoHideMenuIcon = autoHideMenuIcon;
         _store.SaveConfig(_config);
     }
 
@@ -1204,6 +1255,7 @@ public sealed class MainForm : Form
 
         _config.DesktopSearchWidget.Visible = true;
         _store.SaveConfig(_config);
+        PrepareStartupWidget(_desktopSearchWidget);
         _desktopSearchWidget.ShowAsDesktopWidget(_config.DesktopSearchWidget);
         if (minimizeMain)
         {
@@ -1282,8 +1334,7 @@ public sealed class MainForm : Form
 
     private bool HasVisibleDesktopNoteWidgets()
     {
-        return _desktopNoteWidgets.Any(widget => !widget.IsDisposed)
-            || _config.DesktopNoteWidgets.Any(placement => placement.Visible);
+        return _config.DesktopNoteWidgets.Any(placement => placement.Visible);
     }
 
     private void ShowDesktopNoteWidgets()
@@ -1328,6 +1379,7 @@ public sealed class MainForm : Form
 
         var widget = CreateDesktopNoteWidget(item);
         _desktopNoteWidgets.Add(widget);
+        PrepareStartupWidget(widget);
         widget.ShowAsDesktopWidget(placement ?? EnsureDesktopNotePlacement(item));
     }
 
@@ -1806,6 +1858,7 @@ public sealed class MainForm : Form
         _config.DesktopOrganizerWidget ??= new WidgetPlacement();
         _config.DesktopOrganizerWidget.Visible = true;
         _store.SaveConfig(_config);
+        PrepareStartupWidget(_desktopOrganizerWidget);
         _desktopOrganizerWidget.ShowAsDesktopWidget(_config.DesktopOrganizerWidget);
         RestoreDesktopOrganizerSplitWidgets();
         if (minimizeMain)
@@ -1923,6 +1976,7 @@ public sealed class MainForm : Form
         _desktopOrganizerSplitWidgetPlacements[splitWidget] = placement;
         RefreshOrganizerMergeTargets();
         _store.SaveConfig(_config);
+        PrepareStartupWidget(splitWidget);
         splitWidget.ShowAsDesktopWidget(placement);
     }
 
@@ -2074,6 +2128,7 @@ public sealed class MainForm : Form
         RepairDesktopWidgetPlacement(_config.DesktopTodoWidget, new Size(420, 360), 58, 56, 470);
         _config.DesktopTodoWidget.Visible = true;
         _store.SaveConfig(_config);
+        PrepareStartupWidget(_desktopTodoWidget);
         _desktopTodoWidget.ShowAsDesktopWidget(_config.DesktopTodoWidget);
         if (minimizeMain)
         {
@@ -2116,6 +2171,7 @@ public sealed class MainForm : Form
         RepairDesktopWidgetPlacement(_config.DesktopProjectWidget, new Size(560, 340), 58, 80, 520);
         _config.DesktopProjectWidget.Visible = true;
         _store.SaveConfig(_config);
+        PrepareStartupWidget(_desktopProjectWidget);
         _desktopProjectWidget.ShowAsDesktopWidget(_config.DesktopProjectWidget);
         if (minimizeMain)
         {
@@ -2198,6 +2254,7 @@ public sealed class MainForm : Form
             }
         };
         _desktopProjectSplitWidgets.Add(splitWidget);
+        PrepareStartupWidget(splitWidget);
         splitWidget.ShowAsDesktopWidget();
         RefreshDesktopProjectWidget();
     }
@@ -2269,6 +2326,7 @@ public sealed class MainForm : Form
         _config.DesktopLauncherWidget ??= new WidgetPlacement();
         _config.DesktopLauncherWidget.Visible = true;
         _store.SaveConfig(_config);
+        PrepareStartupWidget(_desktopLauncherWidget);
         _desktopLauncherWidget.ShowAsDesktopWidget(_config.DesktopLauncherWidget);
         if (minimizeMain)
         {
@@ -2315,6 +2373,7 @@ public sealed class MainForm : Form
         _config.DesktopSystemMonitorWidget ??= new WidgetPlacement();
         _config.DesktopSystemMonitorWidget.Visible = true;
         _store.SaveConfig(_config);
+        PrepareStartupWidget(_desktopSystemMonitorWidget);
         _desktopSystemMonitorWidget.ShowAsDesktopWidget(_config.DesktopSystemMonitorWidget);
         if (minimizeMain)
         {
@@ -2362,6 +2421,7 @@ public sealed class MainForm : Form
         _config.DesktopClipboardWidget ??= new WidgetPlacement();
         _config.DesktopClipboardWidget.Visible = true;
         _store.SaveConfig(_config);
+        PrepareStartupWidget(_desktopClipboardWidget);
         _desktopClipboardWidget.ShowAsDesktopWidget(_config.DesktopClipboardWidget);
         if (minimizeMain)
         {
@@ -4101,6 +4161,7 @@ public sealed class MainForm : Form
 
             var widget = CreateDesktopNoteWidget(item);
             _desktopNoteWidgets.Add(widget);
+            PrepareStartupWidget(widget);
             widget.ShowAsDesktopWidget(EnsureDesktopNotePlacement(item));
         };
         canvas.ClearImageRequested += item =>
@@ -5513,7 +5574,7 @@ public sealed class MainForm : Form
         {
             switch (key)
             {
-                case "search": if (visible) ShowDesktopSearchWidget(centerOnScreen: true, minimizeMain: true); else CloseDesktopSearchWidget(); break;
+                case "search": if (visible) ShowDesktopSearchWidget(centerOnScreen: true, minimizeMain: false); else CloseDesktopSearchWidget(); break;
                 case "organizer": if (visible) ShowDesktopOrganizerWidget(); else CloseDesktopOrganizerWidget(); break;
                 case "todo": if (visible) ShowDesktopTodoWidget(); else CloseDesktopTodoWidget(); break;
                 case "note": if (visible) ShowDesktopNoteWidgets(); else CloseDesktopNoteWidgets(); break;
@@ -5523,7 +5584,13 @@ public sealed class MainForm : Form
                 case "clipboard": if (visible) ShowDesktopClipboardWidget(); else CloseDesktopClipboardWidget(); break;
             }
 
-            canvas.RefreshData(_store.DataDirectory);
+            BeginInvoke(new Action(() =>
+            {
+                if (!canvas.IsDisposed)
+                {
+                    canvas.RefreshData(_store.DataDirectory);
+                }
+            }));
         };
         canvas.MainHotKeySaveRequested += value => SaveHotKey(value, hotKey => _config.MainWindowHotKey = hotKey, RegisterMainWindowHotKey, canvas);
         canvas.DesktopHotKeySaveRequested += value => SaveHotKey(value, hotKey => _config.DesktopOrganizerHotKey = hotKey, RegisterDesktopOrganizerHotKey, canvas);
@@ -6766,7 +6833,10 @@ public sealed class MainForm : Form
     private static bool IsAutoStartEnabled()
     {
         using var key = Registry.CurrentUser.OpenSubKey(@"Software\Microsoft\Windows\CurrentVersion\Run", writable: false);
-        return string.Equals(key?.GetValue("DustDesk") as string, Application.ExecutablePath, StringComparison.OrdinalIgnoreCase);
+        var command = key?.GetValue("DustDesk") as string;
+        return command is not null
+            && (command.StartsWith($"\"{Application.ExecutablePath}\"", StringComparison.OrdinalIgnoreCase)
+                || command.StartsWith(Application.ExecutablePath, StringComparison.OrdinalIgnoreCase));
     }
 
     private static void SetAutoStart(bool enabled)
@@ -6775,7 +6845,7 @@ public sealed class MainForm : Form
             ?? Registry.CurrentUser.CreateSubKey(@"Software\Microsoft\Windows\CurrentVersion\Run");
         if (enabled)
         {
-            key?.SetValue("DustDesk", Application.ExecutablePath);
+            key?.SetValue("DustDesk", $"\"{Application.ExecutablePath}\" --autostart");
         }
         else
         {
@@ -7428,42 +7498,51 @@ public sealed class MainForm : Form
         _store.SaveConfig(_config);
     }
 
-    private void RestoreDesktopWidgets()
+    private async void RestoreDesktopWidgets()
     {
+        _restoringDesktopWidgets = true;
+        await Task.Yield();
         if (_config.DesktopOrganizerWidget is { Visible: true } organizerPlacement
             || _config.DesktopOrganizerSplitWidgets.Any(placement => placement.Visible))
         {
             ShowDesktopOrganizerWidget(false);
+            await Task.Yield();
         }
 
         if (_config.DesktopTodoWidget is { Visible: true } todoPlacement)
         {
             ShowDesktopTodoWidget(false);
+            await Task.Yield();
         }
 
         if (_config.DesktopProjectWidget is { Visible: true } projectPlacement)
         {
             ShowDesktopProjectWidget(false);
+            await Task.Yield();
         }
 
         if (_config.DesktopLauncherWidget is { Visible: true } launcherPlacement)
         {
             ShowDesktopLauncherWidget(false);
+            await Task.Yield();
         }
 
         if (_config.DesktopSystemMonitorWidget is { Visible: true } monitorPlacement)
         {
             ShowDesktopSystemMonitorWidget(false);
+            await Task.Yield();
         }
 
         if (_config.DesktopSearchWidget is { Visible: true } searchPlacement)
         {
             ShowDesktopSearchWidget();
+            await Task.Yield();
         }
 
         if (_config.DesktopClipboardWidget is { Visible: true } clipboardPlacement)
         {
             ShowDesktopClipboardWidget(false);
+            await Task.Yield();
         }
 
         foreach (var placement in _config.DesktopNoteWidgets.Where(item => item.Visible).ToArray())
@@ -7476,7 +7555,54 @@ public sealed class MainForm : Form
 
             var widget = CreateDesktopNoteWidget(note);
             _desktopNoteWidgets.Add(widget);
+            PrepareStartupWidget(widget);
             widget.ShowAsDesktopWidget(placement);
+            await Task.Yield();
+        }
+
+        await Task.Delay(350);
+        foreach (var form in DesktopWidgetForms().Where(form => !form.IsDisposed))
+        {
+            form.Opacity = 1D;
+            form.Invalidate(true);
+        }
+
+        _restoringDesktopWidgets = false;
+    }
+
+    private void PrepareStartupWidget(Form form)
+    {
+        if (_restoringDesktopWidgets)
+        {
+            form.Opacity = 0D;
+        }
+    }
+
+    private IEnumerable<Form> DesktopWidgetForms()
+    {
+        Form?[] primary =
+        {
+            _desktopOrganizerWidget,
+            _desktopTodoWidget,
+            _desktopProjectWidget,
+            _desktopLauncherWidget,
+            _desktopSystemMonitorWidget,
+            _desktopSearchWidget,
+            _desktopClipboardWidget
+        };
+        foreach (var form in primary)
+        {
+            if (form is not null)
+            {
+                yield return form;
+            }
+        }
+
+        foreach (var form in _desktopOrganizerSplitWidgets.Cast<Form>()
+                     .Concat(_desktopProjectSplitWidgets)
+                     .Concat(_desktopNoteWidgets))
+        {
+            yield return form;
         }
     }
 
@@ -8530,47 +8656,194 @@ internal static class NoteStyle
 
 internal static class DesktopWidgetStyle
 {
-    public const int MinOpacityPercent = 20;
+    public const int MinOpacityPercent = 0;
     public const int MaxOpacityPercent = 70;
     public const int DefaultOpacityPercent = 35;
 
     private static int _opacityPercent = DefaultOpacityPercent;
+    private static int _borderColorArgb = Color.White.ToArgb();
+    private static bool _autoHideMenuIcon;
+    private static readonly Dictionary<Form, AppearanceState> AppearanceStates = new();
+    private static AppearanceState? _currentAppearance;
+
+    private sealed class AppearanceState
+    {
+        public AppearanceState(Form form, WidgetPlacement placement)
+        {
+            Form = form;
+            Placement = placement;
+            Timer.Tick += (_, _) =>
+            {
+                Timer.Stop();
+                MenuIconVisible = false;
+                OpacityChanged?.Invoke();
+            };
+        }
+
+        public Form Form { get; }
+        public WidgetPlacement Placement { get; }
+        public System.Windows.Forms.Timer Timer { get; } = new() { Interval = 10000 };
+        public bool MenuIconVisible { get; set; } = true;
+    }
 
     public static event Action? OpacityChanged;
 
     public static int OpacityPercent
     {
-        get => _opacityPercent;
+        get => _currentAppearance?.Placement.AppearanceOpacityPercent ?? _opacityPercent;
         set
         {
             var opacity = Math.Clamp(value, MinOpacityPercent, MaxOpacityPercent);
-            if (_opacityPercent == opacity)
+            if (_currentAppearance is not null)
             {
+                if (_currentAppearance.Placement.AppearanceOpacityPercent == opacity) return;
+                _currentAppearance.Placement.AppearanceOpacityPercent = opacity;
+                OpacityChanged?.Invoke();
                 return;
             }
 
+            if (_opacityPercent == opacity) return;
             _opacityPercent = opacity;
             OpacityChanged?.Invoke();
         }
     }
 
+    public static void Register(Form form, WidgetPlacement? placement)
+    {
+        if (AppearanceStates.ContainsKey(form)) return;
+        var state = new AppearanceState(form, placement ?? new WidgetPlacement());
+        AppearanceStates[form] = state;
+        form.FormClosed += (_, _) =>
+        {
+            state.Timer.Dispose();
+            AppearanceStates.Remove(form);
+            if (ReferenceEquals(_currentAppearance, state)) _currentAppearance = null;
+        };
+    }
+
+    public static void Use(Form? form)
+    {
+        _currentAppearance = form is not null && AppearanceStates.TryGetValue(form, out var state) ? state : null;
+    }
+
     public static Color WindowTint => Color.FromArgb(Math.Min(95, CardAlpha), 20, 28, 40);
     public static Color CardFill => Color.FromArgb(CardAlpha, 18, 26, 38);
     public static Color ContentFill => Color.FromArgb(ContentAlpha, 24, 34, 48);
-    public static Color BorderColor => Color.FromArgb(CardAlpha, 150, 194, 238);
-    public static Color SearchBackColor => Color.FromArgb(AlphaFromPercent(Math.Min(MaxOpacityPercent, OpacityPercent + 4)), 192, 205);
-    public static Color SearchPanelFillColor => Color.FromArgb(AlphaFromPercent(Math.Min(MaxOpacityPercent, OpacityPercent + 9)), 202, 214);
-    public static Color SearchSelectedColor => Color.FromArgb(AlphaFromPercent(Math.Min(MaxOpacityPercent, OpacityPercent + 15)), 216, 226);
+    public static Color BorderColor
+    {
+        get
+        {
+            var color = Color.FromArgb(_borderColorArgb);
+            return color.A == 0 ? Color.Transparent : Color.FromArgb(220, color.R, color.G, color.B);
+        }
+    }
+    public static Color SearchBackColor => Color.FromArgb(AlphaFromPercent(Math.Min(MaxOpacityPercent, OpacityPercent + 4)), 192, 205, 218);
+    public static Color SearchPanelFillColor => Color.FromArgb(AlphaFromPercent(Math.Min(MaxOpacityPercent, OpacityPercent + 9)), 202, 214, 226);
+    public static Color SearchSelectedColor => Color.FromArgb(AlphaFromPercent(Math.Min(MaxOpacityPercent, OpacityPercent + 15)), 216, 226, 238);
 
     public static Color Selected(Color color) => Color.FromArgb(CardAlpha, color);
+
+    public static void DrawClearText(Graphics graphics, string text, Font font, Rectangle bounds, Color color, TextFormatFlags flags)
+    {
+        var state = graphics.Save();
+        try
+        {
+            graphics.TextRenderingHint = System.Drawing.Text.TextRenderingHint.AntiAliasGridFit;
+            using var brush = new SolidBrush(Color.FromArgb(255, color));
+            using var format = CreateTextFormat(flags);
+            graphics.DrawString(text, font, brush, bounds, format);
+        }
+        finally
+        {
+            graphics.Restore(state);
+        }
+    }
+
+    public static int BorderColorArgb
+    {
+        get => _currentAppearance?.Placement.AppearanceBorderColorArgb ?? _borderColorArgb;
+        set
+        {
+            if (_currentAppearance is not null)
+            {
+                if (_currentAppearance.Placement.AppearanceBorderColorArgb == value) return;
+                _currentAppearance.Placement.AppearanceBorderColorArgb = value;
+                OpacityChanged?.Invoke();
+                return;
+            }
+            if (_borderColorArgb == value) return;
+            _borderColorArgb = value;
+            OpacityChanged?.Invoke();
+        }
+    }
+
+    public static bool AutoHideMenuIcon
+    {
+        get => _currentAppearance?.Placement.AppearanceAutoHideMenuIcon ?? _autoHideMenuIcon;
+        set
+        {
+            if (_currentAppearance is not null)
+            {
+                if (_currentAppearance.Placement.AppearanceAutoHideMenuIcon == value) return;
+                _currentAppearance.Placement.AppearanceAutoHideMenuIcon = value;
+                _currentAppearance.MenuIconVisible = true;
+                RestartMenuIconTimer(_currentAppearance);
+                OpacityChanged?.Invoke();
+                return;
+            }
+            if (_autoHideMenuIcon == value) return;
+            _autoHideMenuIcon = value;
+            OpacityChanged?.Invoke();
+        }
+    }
+
+    public static bool MenuIconVisible => _currentAppearance is null
+        || !AutoHideMenuIcon
+        || _currentAppearance.MenuIconVisible;
+
+    public static void ShowMenuIcon(Form form)
+    {
+        Use(form);
+        if (_currentAppearance is null || !AutoHideMenuIcon) return;
+        var changed = !_currentAppearance.MenuIconVisible;
+        _currentAppearance.MenuIconVisible = true;
+        RestartMenuIconTimer(_currentAppearance);
+        if (changed) OpacityChanged?.Invoke();
+    }
+
+    private static void RestartMenuIconTimer(AppearanceState state)
+    {
+        state.Timer.Stop();
+        if (state.Placement.AppearanceAutoHideMenuIcon == true) state.Timer.Start();
+    }
+
+    public static void DrawClearText(Graphics graphics, string text, Font font, Point location, Color color, TextFormatFlags flags)
+    {
+        var size = Size.Ceiling(graphics.MeasureString(text, font));
+        DrawClearText(graphics, text, font, new Rectangle(location, new Size(size.Width + 2, size.Height + 2)), color, flags);
+    }
+
+    private static StringFormat CreateTextFormat(TextFormatFlags flags)
+    {
+        return new StringFormat(StringFormatFlags.NoWrap)
+        {
+            Alignment = flags.HasFlag(TextFormatFlags.HorizontalCenter) ? StringAlignment.Center
+                : flags.HasFlag(TextFormatFlags.Right) ? StringAlignment.Far
+                : StringAlignment.Near,
+            LineAlignment = flags.HasFlag(TextFormatFlags.VerticalCenter) ? StringAlignment.Center
+                : flags.HasFlag(TextFormatFlags.Bottom) ? StringAlignment.Far
+                : StringAlignment.Near,
+            Trimming = flags.HasFlag(TextFormatFlags.EndEllipsis) ? StringTrimming.EllipsisCharacter : StringTrimming.None
+        };
+    }
 
     public static ToolStripMenuItem CreateOpacityMenu()
     {
         var menu = new ToolStripMenuItem("\u900f\u660e\u5ea6");
-        foreach (var opacity in new[] { 20, 30, 35, 45, 55, 65, 70 })
+        foreach (var opacity in new[] { 0, 20, 30, 35, 45, 55, 65, 70 })
         {
             var item = new ToolStripMenuItem($"{opacity}%") { Tag = opacity };
-            item.Click += (_, _) => OpacityPercent = opacity;
+            item.Click += (_, _) => { UseMenuSource(item); OpacityPercent = opacity; };
             menu.DropDownItems.Add(item);
         }
 
@@ -8588,8 +8861,71 @@ internal static class DesktopWidgetStyle
         return menu;
     }
 
+    public static ToolStripMenuItem CreateBorderColorMenu()
+    {
+        var menu = new ToolStripMenuItem("边框颜色");
+        var colors = new (string Name, Color Color)[]
+        {
+            ("无", Color.Transparent), ("黑色", Color.Black), ("白色", Color.White),
+            ("红色", Color.Red), ("橙色", Color.Orange), ("黄色", Color.Gold),
+            ("绿色", Color.LimeGreen), ("青色", Color.Cyan), ("蓝色", Color.DodgerBlue),
+            ("紫色", Color.MediumPurple)
+        };
+        foreach (var entry in colors)
+        {
+            var item = new ToolStripMenuItem(entry.Name) { Tag = entry.Color.ToArgb() };
+            item.Click += (_, _) => { UseMenuSource(item); BorderColorArgb = (int)item.Tag; };
+            menu.DropDownItems.Add(item);
+        }
+        menu.DropDownOpening += (_, _) =>
+        {
+            UseMenuSource(menu);
+            UseMenuSource(menu);
+            foreach (ToolStripItem item in menu.DropDownItems)
+            {
+                if (item is ToolStripMenuItem colorItem && colorItem.Tag is int argb)
+                {
+                    colorItem.Checked = argb == BorderColorArgb;
+                }
+            }
+        };
+        return menu;
+    }
+
+    public static ToolStripMenuItem CreateMenuIconMenu()
+    {
+        var menu = new ToolStripMenuItem("菜单图标");
+        var always = new ToolStripMenuItem("始终显示");
+        var autoHide = new ToolStripMenuItem("10秒后隐藏");
+        always.Click += (_, _) => { UseMenuSource(always); AutoHideMenuIcon = false; };
+        autoHide.Click += (_, _) => { UseMenuSource(autoHide); AutoHideMenuIcon = true; };
+        menu.DropDownItems.Add(always);
+        menu.DropDownItems.Add(autoHide);
+        menu.DropDownOpening += (_, _) =>
+        {
+            UseMenuSource(menu);
+            always.Checked = !AutoHideMenuIcon;
+            autoHide.Checked = AutoHideMenuIcon;
+        };
+        return menu;
+    }
+
+    private static void UseMenuSource(ToolStripItem item)
+    {
+        ToolStripItem? current = item;
+        while (current?.Owner is ToolStripDropDown dropDown)
+        {
+            if (dropDown is ContextMenuStrip contextMenu)
+            {
+                Use(contextMenu.SourceControl?.FindForm());
+                return;
+            }
+            current = dropDown.OwnerItem;
+        }
+    }
+
     private static int CardAlpha => AlphaFromPercent(OpacityPercent);
-    private static int ContentAlpha => AlphaFromPercent(Math.Max(MinOpacityPercent, OpacityPercent - 5));
+    private static int ContentAlpha => OpacityPercent == 0 ? 0 : AlphaFromPercent(Math.Max(20, OpacityPercent - 5));
 
     private static int AlphaFromPercent(int percent)
     {
@@ -8708,6 +9044,8 @@ internal sealed class DesktopTodoWidgetForm : Form
 
     public void ShowAsDesktopWidget(WidgetPlacement? placement = null)
     {
+        DesktopWidgetStyle.Register(this, placement);
+        DesktopWidgetStyle.Use(this);
         _placement = placement;
         SetPositionLocked(placement?.Locked == true, save: false);
         SetAutoCollapseEnabled(placement?.AutoCollapseEnabled == true || placement?.IsCollapsed == true, save: false, collapse: false);
@@ -8780,11 +9118,15 @@ internal sealed class DesktopTodoWidgetForm : Form
 
     private void ApplyWidgetSkin()
     {
-        BackColor = Color.FromArgb(20, 28, 40);
+        DesktopWidgetStyle.Use(this);
+        var fullyTransparent = _transparent && DesktopWidgetStyle.OpacityPercent == 0;
+        BackColor = fullyTransparent ? Color.Black : Color.FromArgb(20, 28, 40);
         _view.BackColor = BackColor;
         if (IsHandleCreated)
         {
-            NativeGlass.EnableAcrylic(Handle, _transparent ? DesktopWidgetStyle.WindowTint : Color.FromArgb(232, 18, 26, 38));
+            NativeGlass.EnableAcrylic(Handle, fullyTransparent
+                ? Color.Transparent
+                : _transparent ? DesktopWidgetStyle.WindowTint : Color.FromArgb(232, 18, 26, 38));
         }
 
         _view.Invalidate();
@@ -9192,6 +9534,8 @@ internal sealed class DesktopLauncherWidgetForm : Form
 
     public void ShowAsDesktopWidget(WidgetPlacement? placement = null)
     {
+        DesktopWidgetStyle.Register(this, placement);
+        DesktopWidgetStyle.Use(this);
         _placement = placement;
         SetPositionLocked(placement?.Locked == true, save: false);
         ApplyPlacementOrDefault(placement);
@@ -9286,11 +9630,15 @@ internal sealed class DesktopLauncherWidgetForm : Form
 
     private void ApplyWidgetSkin()
     {
-        BackColor = Color.FromArgb(20, 28, 40);
+        DesktopWidgetStyle.Use(this);
+        var fullyTransparent = _transparent && DesktopWidgetStyle.OpacityPercent == 0;
+        BackColor = fullyTransparent ? Color.Black : Color.FromArgb(20, 28, 40);
         _view.BackColor = BackColor;
         if (IsHandleCreated)
         {
-            NativeGlass.EnableAcrylic(Handle, _transparent ? DesktopWidgetStyle.WindowTint : Color.FromArgb(232, 18, 26, 38));
+            NativeGlass.EnableAcrylic(Handle, fullyTransparent
+                ? Color.Transparent
+                : _transparent ? DesktopWidgetStyle.WindowTint : Color.FromArgb(232, 18, 26, 38));
         }
 
         _view.Invalidate();
@@ -9571,6 +9919,7 @@ internal sealed class DesktopLauncherWidgetView : Control
     private readonly Action<bool> _showNamesChanged;
     private readonly Action<int> _iconSizeChanged;
     private readonly Dictionary<string, Image> _iconCache = new(StringComparer.OrdinalIgnoreCase);
+    private readonly HashSet<string> _pendingIconLoads = new(StringComparer.OrdinalIgnoreCase);
     private readonly List<Image> _menuItemImages = new();
     private readonly List<(Rectangle Rect, LaunchItem Item)> _launcherAreas = new();
     private readonly Image? _settingsIcon;
@@ -9681,6 +10030,8 @@ internal sealed class DesktopLauncherWidgetView : Control
         var opacityMenu = DesktopWidgetStyle.CreateOpacityMenu();
         SetMenuIcon(opacityMenu, "zicaidan", "4-4.png");
         appearanceMenu.DropDownItems.Add(opacityMenu);
+        appearanceMenu.DropDownItems.Add(DesktopWidgetStyle.CreateBorderColorMenu());
+        appearanceMenu.DropDownItems.Add(DesktopWidgetStyle.CreateMenuIconMenu());
         appearanceMenu.DropDownItems.Add(_showNamesMenuItem);
         appearanceMenu.DropDownItems.Add(iconSizeMenu);
         _menu.Items.Add(appearanceMenu);
@@ -9704,6 +10055,12 @@ internal sealed class DesktopLauncherWidgetView : Control
             _chromeTimer.Stop();
             if (!_chromeVisible)
             {
+                return;
+            }
+
+            if (_menu.Visible)
+            {
+                RestartChromeTimer();
                 return;
             }
 
@@ -9954,6 +10311,7 @@ internal sealed class DesktopLauncherWidgetView : Control
         var g = e.Graphics;
         g.SmoothingMode = SmoothingMode.AntiAlias;
         g.TextRenderingHint = System.Drawing.Text.TextRenderingHint.ClearTypeGridFit;
+        DesktopWidgetStyle.Use(FindForm());
         _launcherAreas.Clear();
 
         var card = new Rectangle(0, 0, Width, Height);
@@ -9971,13 +10329,13 @@ internal sealed class DesktopLauncherWidgetView : Control
                 titleX = 48;
             }
 
-            TextRenderer.DrawText(g, "快捷启动", TitleFont, new Rectangle(titleX, 12, Math.Max(80, Width - titleX - 74), 28), TextMain, TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis);
+            DrawDesktopText(g, "快捷启动", TitleFont, TextMain, new Rectangle(titleX, 12, Math.Max(80, Width - titleX - 74), 28), TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis);
             _settingsRect = new Rectangle(Width - 48, 10, 32, 32);
-            if (_settingsIcon is not null)
+            if (DesktopWidgetStyle.MenuIconVisible && _settingsIcon is not null)
             {
                 g.DrawImage(_settingsIcon, _settingsRect);
             }
-            else
+            else if (DesktopWidgetStyle.MenuIconVisible)
             {
                 DrawGearIcon(g, _settingsRect, Color.FromArgb(130, 180, 255));
             }
@@ -10021,7 +10379,7 @@ internal sealed class DesktopLauncherWidgetView : Control
         var shellIcon = GetShellIcon(item.Path);
         if (shellIcon is not null)
         {
-            g.DrawImage(shellIcon, icon);
+            ShellIconLoader.DrawSharp(g, shellIcon, icon);
         }
         else
         {
@@ -10060,13 +10418,29 @@ internal sealed class DesktopLauncherWidgetView : Control
             return cached;
         }
 
-        var icon = ShellIconLoader.LoadLargeIcon(path);
+        if (_pendingIconLoads.Add(path))
+        {
+            LoadShellIconAsync(path);
+        }
+
+        return null;
+    }
+
+    private async void LoadShellIconAsync(string path)
+    {
+        var icon = await Task.Run(() => ShellIconLoader.LoadLargeIcon(path));
+        _pendingIconLoads.Remove(path);
+        if (IsDisposed)
+        {
+            icon?.Dispose();
+            return;
+        }
+
         if (icon is not null)
         {
             _iconCache[path] = icon;
+            Invalidate();
         }
-
-        return icon;
     }
 
     private void DrawResizeGrip(Graphics g)
@@ -10207,9 +10581,14 @@ internal sealed class DesktopLauncherWidgetView : Control
         return path;
     }
 
-    private static void DrawCentered(Graphics g, string text, Font font, Color color, Rectangle rect)
+    private void DrawCentered(Graphics g, string text, Font font, Color color, Rectangle rect)
     {
-        TextRenderer.DrawText(g, text, font, rect, color, TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis);
+        DrawDesktopText(g, text, font, color, rect, TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis | TextFormatFlags.NoPadding);
+    }
+
+    private void DrawDesktopText(Graphics g, string text, Font font, Color color, Rectangle rect, TextFormatFlags flags)
+    {
+        DesktopWidgetStyle.DrawClearText(g, text, font, rect, color, flags);
     }
 
     private static string TrimDisplayName(string name, int maxLength)
@@ -10336,6 +10715,8 @@ internal sealed class DesktopSystemMonitorWidgetForm : Form
 
     public void ShowAsDesktopWidget(WidgetPlacement? placement = null)
     {
+        DesktopWidgetStyle.Register(this, placement);
+        DesktopWidgetStyle.Use(this);
         _placement = placement;
         SetPositionLocked(placement?.Locked == true, save: false);
         ApplyPlacementOrDefault(placement);
@@ -10380,11 +10761,15 @@ internal sealed class DesktopSystemMonitorWidgetForm : Form
 
     private void ApplyWidgetSkin()
     {
-        BackColor = Color.FromArgb(20, 28, 40);
+        DesktopWidgetStyle.Use(this);
+        var fullyTransparent = _transparent && DesktopWidgetStyle.OpacityPercent == 0;
+        BackColor = fullyTransparent ? Color.Black : Color.FromArgb(20, 28, 40);
         _view.BackColor = BackColor;
         if (IsHandleCreated)
         {
-            NativeGlass.EnableAcrylic(Handle, _transparent ? DesktopWidgetStyle.WindowTint : Color.FromArgb(232, 18, 26, 38));
+            NativeGlass.EnableAcrylic(Handle, fullyTransparent
+                ? Color.Transparent
+                : _transparent ? DesktopWidgetStyle.WindowTint : Color.FromArgb(232, 18, 26, 38));
         }
 
         _view.Invalidate();
@@ -10629,6 +11014,8 @@ internal sealed class DesktopSystemMonitorWidgetView : Control
         var opacityMenu = DesktopWidgetStyle.CreateOpacityMenu();
         SetMenuIcon(opacityMenu, "zicaidan", "4-4.png");
         appearanceMenu.DropDownItems.Add(opacityMenu);
+        appearanceMenu.DropDownItems.Add(DesktopWidgetStyle.CreateBorderColorMenu());
+        appearanceMenu.DropDownItems.Add(DesktopWidgetStyle.CreateMenuIconMenu());
         _menu.Items.Add(appearanceMenu);
         _menu.Items.Add(new ToolStripSeparator());
         var settingsMenuItem = _menu.Items.Add("设置中心", null, (_, _) => ManageRequested?.Invoke());
@@ -10775,6 +11162,7 @@ internal sealed class DesktopSystemMonitorWidgetView : Control
         var g = e.Graphics;
         g.SmoothingMode = SmoothingMode.AntiAlias;
         g.TextRenderingHint = System.Drawing.Text.TextRenderingHint.ClearTypeGridFit;
+        DesktopWidgetStyle.Use(FindForm());
         var card = new Rectangle(0, 0, Width - 1, Height - 1);
         if (card.Width < 220 || card.Height < 140)
         {
@@ -10798,8 +11186,11 @@ internal sealed class DesktopSystemMonitorWidgetView : Control
             titleX = card.X + 44;
         }
 
-        TextRenderer.DrawText(g, "系统检测", TitleFont, new Rectangle(titleX, card.Y + 12, _settingsRect.Left - titleX - 8, 34), TextMain, TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis);
-        DrawGearIcon(g, _settingsRect, Color.FromArgb(130, 180, 255));
+        DesktopWidgetStyle.DrawClearText(g, "系统检测", TitleFont, new Rectangle(titleX, card.Y + 12, _settingsRect.Left - titleX - 8, 34), TextMain, TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis);
+        if (DesktopWidgetStyle.MenuIconVisible)
+        {
+            DrawGearIcon(g, _settingsRect, Color.FromArgb(130, 180, 255));
+        }
         using var pen = new Pen(_transparent ? Color.FromArgb(145, 220, 245, 255) : Color.FromArgb(72, 104, 130, 156));
         g.DrawLine(pen, card.X + 14, card.Y + 54, card.Right - 14, card.Y + 54);
     }
@@ -10855,7 +11246,7 @@ internal sealed class DesktopSystemMonitorWidgetView : Control
 
         if (rows.Count == 0)
         {
-            TextRenderer.DrawText(g, "未选择检测项", NormalFont, panel, TextMuted, TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter);
+            DesktopWidgetStyle.DrawClearText(g, "未选择检测项", NormalFont, panel, TextMuted, TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter);
             return;
         }
 
@@ -10879,8 +11270,8 @@ internal sealed class DesktopSystemMonitorWidgetView : Control
             g.DrawImage(icon, new Rectangle(rect.X + 4, rect.Y + 2, 18, 18));
         }
 
-        TextRenderer.DrawText(g, fallbackLabel, NormalFont, new Rectangle(labelX, rect.Y, labelWidth, 22), TextMuted, TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis | TextFormatFlags.NoPadding);
-        TextRenderer.DrawText(g, value, ValueFont, new Rectangle(valueX, rect.Y, Math.Max(1, rect.Right - valueX), 22), TextMain, TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis | TextFormatFlags.NoPadding);
+        DesktopWidgetStyle.DrawClearText(g, fallbackLabel, NormalFont, new Rectangle(labelX, rect.Y, labelWidth, 22), TextMuted, TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis | TextFormatFlags.NoPadding);
+        DesktopWidgetStyle.DrawClearText(g, value, ValueFont, new Rectangle(valueX, rect.Y, Math.Max(1, rect.Right - valueX), 22), TextMain, TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis | TextFormatFlags.NoPadding);
         var track = new Rectangle(valueX, rect.Bottom - 5, Math.Max(1, rect.Right - valueX), 3);
         FillRound(g, track, Color.FromArgb(54, 78, 96, 120), 3);
         var fill = new Rectangle(track.X, track.Y, Math.Max(2, (int)(track.Width * Math.Clamp(percent, 0D, 1D))), track.Height);
@@ -11403,6 +11794,8 @@ internal sealed class DesktopProjectWidgetForm : Form
 
     public void ShowAsDesktopWidget(WidgetPlacement? placement = null)
     {
+        DesktopWidgetStyle.Register(this, placement);
+        DesktopWidgetStyle.Use(this);
         _placement = placement;
         SetPositionLocked(placement?.Locked == true, save: false);
         SetAutoCollapseEnabled(placement?.AutoCollapseEnabled == true || placement?.IsCollapsed == true, save: false, collapse: false);
@@ -11475,11 +11868,15 @@ internal sealed class DesktopProjectWidgetForm : Form
 
     private void ApplyWidgetSkin()
     {
-        BackColor = Color.FromArgb(20, 28, 40);
+        DesktopWidgetStyle.Use(this);
+        var fullyTransparent = _transparent && DesktopWidgetStyle.OpacityPercent == 0;
+        BackColor = fullyTransparent ? Color.Black : Color.FromArgb(20, 28, 40);
         _view.BackColor = BackColor;
         if (IsHandleCreated)
         {
-            NativeGlass.EnableAcrylic(Handle, _transparent ? DesktopWidgetStyle.WindowTint : Color.FromArgb(232, 18, 26, 38));
+            NativeGlass.EnableAcrylic(Handle, fullyTransparent
+                ? Color.Transparent
+                : _transparent ? DesktopWidgetStyle.WindowTint : Color.FromArgb(232, 18, 26, 38));
         }
 
         _view.Invalidate();
@@ -11877,6 +12274,8 @@ internal sealed class DesktopProjectWidgetView : Control
         var opacityMenu = DesktopWidgetStyle.CreateOpacityMenu();
         SetMenuIcon(opacityMenu, "zicaidan", "4-4.png");
         appearanceMenu.DropDownItems.Add(opacityMenu);
+        appearanceMenu.DropDownItems.Add(DesktopWidgetStyle.CreateBorderColorMenu());
+        appearanceMenu.DropDownItems.Add(DesktopWidgetStyle.CreateMenuIconMenu());
         _menu.Items.Add(appearanceMenu);
         _menu.Items.Add(new ToolStripSeparator());
         var settingsMenuItem = _menu.Items.Add("设置中心", null, (_, _) => ManageRequested?.Invoke());
@@ -12207,6 +12606,7 @@ internal sealed class DesktopProjectWidgetView : Control
         var g = e.Graphics;
         g.SmoothingMode = SmoothingMode.AntiAlias;
         g.TextRenderingHint = System.Drawing.Text.TextRenderingHint.ClearTypeGridFit;
+        DesktopWidgetStyle.Use(FindForm());
         _projectAreas.Clear();
         _phaseAreas.Clear();
         var projects = Projects();
@@ -12227,16 +12627,16 @@ internal sealed class DesktopProjectWidgetView : Control
         }
         else
         {
-            TextRenderer.DrawText(g, "□", TitleFont, headerIcon, TextMain, TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter);
+            DesktopWidgetStyle.DrawClearText(g, "□", TitleFont, headerIcon, TextMain, TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter);
         }
 
-        TextRenderer.DrawText(g, "项目管理", TitleFont, new Rectangle(46, 12, 110, 28), TextMain, TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis);
+        DesktopWidgetStyle.DrawClearText(g, "项目管理", TitleFont, new Rectangle(46, 12, 110, 28), TextMain, TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis);
         _settingsRect = new Rectangle(Width - 52, 8, 40, 40);
-        if (_settingsIcon is not null)
+        if (DesktopWidgetStyle.MenuIconVisible && _settingsIcon is not null)
         {
             g.DrawImage(_settingsIcon, new Rectangle(_settingsRect.X + 4, _settingsRect.Y + 4, 32, 32));
         }
-        else
+        else if (DesktopWidgetStyle.MenuIconVisible)
         {
             DrawGearIcon(g, new Rectangle(_settingsRect.X + 4, _settingsRect.Y + 4, 32, 32), Color.FromArgb(82, 168, 255));
         }
@@ -12274,7 +12674,7 @@ internal sealed class DesktopProjectWidgetView : Control
 
             var tab = new Rectangle(x, rect.Y, Math.Min(width, rect.Right - x), rect.Height);
             FillRound(g, tab, CurrentTabFill(project == selectedProject), 6);
-            TextRenderer.DrawText(g, project.Name, SmallFont, new Rectangle(tab.X + 10, tab.Y, tab.Width - 20, tab.Height), project == selectedProject ? Color.White : TextMain, TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis);
+            DesktopWidgetStyle.DrawClearText(g, project.Name, SmallFont, new Rectangle(tab.X + 10, tab.Y, tab.Width - 20, tab.Height), project == selectedProject ? Color.White : TextMain, TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis);
             _projectAreas.Add((tab, i));
             x += width + 8;
         }
@@ -12304,10 +12704,10 @@ internal sealed class DesktopProjectWidgetView : Control
             var titleWidth = TextRenderer.MeasureText(item.Title, NormalFont).Width + 10;
             var maxTitleWidth = Math.Max(90, row.Width - dateWidth - minTrackWidth - percentWidth - columnGap * 4);
             var phaseNameRect = new Rectangle(row.X, row.Y, Math.Clamp(titleWidth, 90, maxTitleWidth), 22);
-            TextRenderer.DrawText(g, item.Title, NormalFont, phaseNameRect, TextMain, TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis);
+            DesktopWidgetStyle.DrawClearText(g, item.Title, NormalFont, phaseNameRect, TextMain, TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis);
             _phaseAreas.Add((row, item));
             var dateRect = new Rectangle(phaseNameRect.Right + columnGap, row.Y, dateWidth, 22);
-            TextRenderer.DrawText(g, ProjectDateText(item), SmallFont, dateRect, TextMuted, TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.NoPadding);
+            DesktopWidgetStyle.DrawClearText(g, ProjectDateText(item), SmallFont, dateRect, TextMain, TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.NoPadding);
             var percentRect = new Rectangle(row.Right - percentWidth, row.Y, percentWidth, 22);
             var trackX = dateRect.Right + columnGap;
             var track = new Rectangle(trackX, row.Y + 8, Math.Max(60, percentRect.Left - trackX - columnGap), 8);
@@ -12319,7 +12719,7 @@ internal sealed class DesktopProjectWidgetView : Control
 
             DrawProgressTicks(g, track, item.SubItems.Count);
 
-            TextRenderer.DrawText(g, $"{percent}%", SmallFont, percentRect, TextMuted, TextFormatFlags.Right | TextFormatFlags.VerticalCenter | TextFormatFlags.NoPadding);
+            DesktopWidgetStyle.DrawClearText(g, $"{percent}%", SmallFont, percentRect, TextMuted, TextFormatFlags.Right | TextFormatFlags.VerticalCenter | TextFormatFlags.NoPadding);
             y += 42;
         }
     }
@@ -12449,12 +12849,12 @@ internal sealed class DesktopProjectWidgetView : Control
 
     private static void DrawText(Graphics g, string text, Font font, Color color, int x, int y)
     {
-        TextRenderer.DrawText(g, text, font, new Point(x, y), color, TextFormatFlags.NoPadding | TextFormatFlags.PreserveGraphicsClipping);
+        DesktopWidgetStyle.DrawClearText(g, text, font, new Point(x, y), color, TextFormatFlags.NoPadding | TextFormatFlags.PreserveGraphicsClipping);
     }
 
     private static void DrawCentered(Graphics g, string text, Font font, Color color, Rectangle rect)
     {
-        TextRenderer.DrawText(g, text, font, rect, color, TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis);
+        DesktopWidgetStyle.DrawClearText(g, text, font, rect, color, TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis);
     }
 
     private static Image TintImage(Image source, Color color)
@@ -12629,6 +13029,8 @@ internal sealed class DesktopTodoWidgetView : Control
         var opacityMenu = DesktopWidgetStyle.CreateOpacityMenu();
         SetMenuIcon(opacityMenu, "zicaidan", "4-4.png");
         appearanceMenu.DropDownItems.Add(opacityMenu);
+        appearanceMenu.DropDownItems.Add(DesktopWidgetStyle.CreateBorderColorMenu());
+        appearanceMenu.DropDownItems.Add(DesktopWidgetStyle.CreateMenuIconMenu());
         _menu.Items.Add(appearanceMenu);
         _menu.Items.Add(new ToolStripSeparator());
         var settingsMenuItem = _menu.Items.Add("设置中心", null, (_, _) => _manageRequested());
@@ -12865,6 +13267,7 @@ internal sealed class DesktopTodoWidgetView : Control
         var g = e.Graphics;
         g.SmoothingMode = SmoothingMode.AntiAlias;
         g.TextRenderingHint = System.Drawing.Text.TextRenderingHint.ClearTypeGridFit;
+        DesktopWidgetStyle.Use(FindForm());
         _checkAreas.Clear();
         _rowAreas.Clear();
         _overdueDateAreas.Clear();
@@ -12906,11 +13309,11 @@ internal sealed class DesktopTodoWidgetView : Control
             : $"{displayDate:yyyy-MM-dd}  {WeekText(displayDate.DayOfWeek)}  {LunarText(displayDate)}";
         DrawSingleLineText(g, dateText, SmallFont, dateRect, TextSubtle);
 
-        if (_settingsIcon is not null)
+        if (DesktopWidgetStyle.MenuIconVisible && _settingsIcon is not null)
         {
             g.DrawImage(_settingsIcon, _settingsRect);
         }
-        else
+        else if (DesktopWidgetStyle.MenuIconVisible)
         {
             DrawGearIcon(g, _settingsRect, Color.FromArgb(130, 180, 255));
         }
@@ -13231,7 +13634,7 @@ internal sealed class DesktopTodoWidgetView : Control
 
     private static void DrawSingleLineText(Graphics g, string text, Font font, Rectangle rect, Color color)
     {
-        TextRenderer.DrawText(
+        DesktopWidgetStyle.DrawClearText(
             g,
             text,
             font,
@@ -13242,7 +13645,7 @@ internal sealed class DesktopTodoWidgetView : Control
 
     private static void DrawCenteredText(Graphics g, string text, Font font, Color color, Rectangle rect)
     {
-        TextRenderer.DrawText(
+        DesktopWidgetStyle.DrawClearText(
             g,
             text,
             font,
@@ -13302,8 +13705,8 @@ internal sealed class DesktopNoteWidgetForm : Form
             }
         };
         Controls.Add(_view);
-        DesktopWidgetStyle.OpacityChanged += _view.Invalidate;
-        FormClosed += (_, _) => DesktopWidgetStyle.OpacityChanged -= _view.Invalidate;
+        DesktopWidgetStyle.OpacityChanged += ApplyWidgetSkin;
+        FormClosed += (_, _) => DesktopWidgetStyle.OpacityChanged -= ApplyWidgetSkin;
         MinimumSize = ExpandedMinimumSize;
         if (_note.ImageOnly && !_view.NaturalImageSize.IsEmpty)
         {
@@ -13332,6 +13735,8 @@ internal sealed class DesktopNoteWidgetForm : Form
 
     public void ShowAsDesktopWidget(WidgetPlacement? placement = null)
     {
+        DesktopWidgetStyle.Register(this, placement);
+        DesktopWidgetStyle.Use(this);
         _placement = placement;
         SetPositionLocked(placement?.Locked == true, save: false);
         SetCollapsed(placement?.IsCollapsed == true, save: false, resize: false);
@@ -13601,6 +14006,25 @@ internal sealed class DesktopNoteWidgetForm : Form
         _placementChanged(_note, NormalizeScreenBounds(_screenBounds.Width > 0 && _screenBounds.Height > 0 ? _screenBounds : Bounds));
     }
 
+    protected override void OnHandleCreated(EventArgs e)
+    {
+        base.OnHandleCreated(e);
+        ApplyWidgetSkin();
+    }
+
+    private void ApplyWidgetSkin()
+    {
+        DesktopWidgetStyle.Use(this);
+        var fullyTransparent = DesktopWidgetStyle.OpacityPercent == 0;
+        BackColor = fullyTransparent ? Color.Black : Color.FromArgb(20, 28, 40);
+        _view.BackColor = BackColor;
+        if (IsHandleCreated)
+        {
+            NativeGlass.EnableAcrylic(Handle, fullyTransparent ? Color.Transparent : DesktopWidgetStyle.WindowTint);
+        }
+        _view.Invalidate();
+    }
+
     private Rectangle NormalizeScreenBounds(Rectangle bounds)
     {
         var workArea = Screen.FromRectangle(bounds).WorkingArea;
@@ -13669,6 +14093,8 @@ internal sealed class DesktopNoteWidgetView : Control
         _menu.Items.Add(componentMenu);
         var appearanceMenu = new ToolStripMenuItem("外观设置", LoadNoteMenuImage("zicaidan", "4.png"));
         appearanceMenu.DropDownItems.Add(DesktopWidgetStyle.CreateOpacityMenu());
+        appearanceMenu.DropDownItems.Add(DesktopWidgetStyle.CreateBorderColorMenu());
+        appearanceMenu.DropDownItems.Add(DesktopWidgetStyle.CreateMenuIconMenu());
         _menu.Items.Add(appearanceMenu);
         _menu.Items.Add(new ToolStripSeparator());
         _menu.Items.Add("设置中心", LoadNoteMenuImage("Menu", "shezhizhognxin.png"), (_, _) => _manageRequested());
@@ -13883,9 +14309,16 @@ internal sealed class DesktopNoteWidgetView : Control
         var g = e.Graphics;
         g.SmoothingMode = SmoothingMode.AntiAlias;
         g.TextRenderingHint = System.Drawing.Text.TextRenderingHint.ClearTypeGridFit;
+        DesktopWidgetStyle.Use(FindForm());
         var rect = new Rectangle(0, 0, ClientSize.Width - 1, ClientSize.Height - 1);
+        var fullyTransparent = DesktopWidgetStyle.OpacityPercent == 0;
         var noteColor = Color.FromArgb(_note.ColorArgb);
-        if (noteColor.A > 0)
+        if (fullyTransparent)
+        {
+            using var border = new Pen(DesktopWidgetStyle.BorderColor, 1.2F);
+            g.DrawRectangle(border, rect);
+        }
+        else if (noteColor.A > 0)
         {
             using var fill = new SolidBrush(noteColor);
             g.FillRectangle(fill, rect);
@@ -13919,14 +14352,20 @@ internal sealed class DesktopNoteWidgetView : Control
 
         if (!_note.ImageOnly || _collapsed)
         {
-            using var header = new SolidBrush(DesktopWidgetStyle.ContentFill);
-            g.FillRectangle(header, 0, 0, Width, 36);
+            if (!fullyTransparent)
+            {
+                using var header = new SolidBrush(DesktopWidgetStyle.ContentFill);
+                g.FillRectangle(header, 0, 0, Width, 36);
+            }
             using var titleFont = new Font("Microsoft YaHei UI", 10F, FontStyle.Bold);
             DrawSingleLineText(g, _note.Title, titleFont, GetTitleRect(), NoteStyle.TextColor(_note));
         }
 
         _closeRect = new Rectangle(Width - 34, 4, 26, 26);
-        DrawMenuButton(g, _closeRect);
+        if (DesktopWidgetStyle.MenuIconVisible)
+        {
+            DrawMenuButton(g, _closeRect);
+        }
 
         if (!_collapsed)
         {
@@ -13982,7 +14421,7 @@ internal sealed class DesktopNoteWidgetView : Control
             Text = _note.Title,
             Bounds = GetTitleEditorBounds(),
             BorderStyle = BorderStyle.FixedSingle,
-            BackColor = Color.FromArgb(238, 248, 238, 180),
+            BackColor = Color.FromArgb(255, 248, 238, 180),
             ForeColor = NoteStyle.TextColor(_note),
             Font = new Font("Microsoft YaHei UI", 10F, FontStyle.Bold)
         };
@@ -15215,6 +15654,8 @@ internal sealed class DesktopOrganizerWidgetForm : Form
 
     public void ShowAsDesktopWidget(WidgetPlacement? placement = null)
     {
+        DesktopWidgetStyle.Register(this, placement);
+        DesktopWidgetStyle.Use(this);
         _placement = placement;
         SetPositionLocked(placement?.Locked == true, save: false);
         SetAutoCollapseEnabled(placement?.AutoCollapseEnabled == true || placement?.IsCollapsed == true, save: false, collapse: false);
@@ -15658,15 +16099,22 @@ internal sealed class DesktopOrganizerWidgetForm : Form
 
     private void ApplyWidgetSkin()
     {
+        DesktopWidgetStyle.Use(this);
         Opacity = 1.0;
-        BackColor = Color.FromArgb(20, 28, 40);
+        var transparent = _config.DesktopWidgetTransparent;
+        BackColor = transparent ? Color.Black : Color.FromArgb(20, 28, 40);
         _view.BackColor = BackColor;
+        TransparencyKey = Color.Empty;
         if (IsHandleCreated)
         {
-            var tint = _config.DesktopWidgetTransparent
-                ? DesktopWidgetStyle.WindowTint
-                : Color.FromArgb(232, 18, 26, 38);
-            NativeGlass.EnableAcrylic(Handle, tint);
+            if (transparent)
+            {
+                NativeGlass.EnableAcrylic(Handle, DesktopWidgetStyle.OpacityPercent == 0 ? Color.Transparent : DesktopWidgetStyle.WindowTint);
+            }
+            else
+            {
+                NativeGlass.EnableAcrylic(Handle, Color.FromArgb(232, 18, 26, 38));
+            }
         }
 
         _view.RefreshData();
@@ -16058,6 +16506,8 @@ internal sealed class DesktopOrganizerWidgetView : Control
     private readonly Dictionary<DeskCategory, int> _previewScrollOffsets = new();
     private readonly HashSet<DeskCategory> _multiSelectedCategories = new();
     private readonly Dictionary<string, Image> _shellIconCache = new(StringComparer.OrdinalIgnoreCase);
+    private readonly HashSet<string> _pendingShellIconLoads = new(StringComparer.OrdinalIgnoreCase);
+    private readonly HashSet<string> _failedShellIconLoads = new(StringComparer.OrdinalIgnoreCase);
     private readonly List<Image> _menuItemImages = new();
     private readonly List<DesktopOrganizerMergeTarget> _mergeTargets = new();
     private readonly ContextMenuStrip _menu = new();
@@ -16141,11 +16591,11 @@ internal sealed class DesktopOrganizerWidgetView : Control
     private static readonly Color TextMain = Color.FromArgb(252, 255, 255);
     private static readonly Color TextMuted = Color.FromArgb(218, 232, 248);
     private static readonly Color Accent = Color.FromArgb(58, 109, 248);
-    private static readonly Font HeaderFont = new("Microsoft YaHei UI", 11.5F, FontStyle.Regular);
-    private static readonly Font TitleFont = new("Microsoft YaHei UI", 10.5F, FontStyle.Regular);
-    private static readonly Font NormalFont = new("Microsoft YaHei UI", 8.8F);
-    private static readonly Font SmallFont = new("Microsoft YaHei UI", 8F);
-    private static readonly Font IconFont = new("Microsoft YaHei UI", 11F, FontStyle.Bold);
+    private static readonly Font HeaderFont = new("Microsoft YaHei UI", 11F, FontStyle.Regular);
+    private static readonly Font TitleFont = new("Microsoft YaHei UI", 10F, FontStyle.Regular);
+    private static readonly Font NormalFont = new("Microsoft YaHei UI", 9F, FontStyle.Regular);
+    private static readonly Font SmallFont = new("Microsoft YaHei UI", 8F, FontStyle.Regular);
+    private static readonly Font IconFont = new("Microsoft YaHei UI", 11F, FontStyle.Regular);
 
     private Color CurrentCardFill => _config.DesktopWidgetTransparent ? DesktopWidgetStyle.CardFill : CardFill;
     private Color CurrentCardBorder => _config.DesktopWidgetTransparent ? DesktopWidgetStyle.BorderColor : CardBorder;
@@ -16264,6 +16714,8 @@ internal sealed class DesktopOrganizerWidgetView : Control
         var opacityMenu = DesktopWidgetStyle.CreateOpacityMenu();
         SetMenuIcon(opacityMenu, "zicaidan", "4-4.png");
         appearanceMenu.DropDownItems.Add(opacityMenu);
+        appearanceMenu.DropDownItems.Add(DesktopWidgetStyle.CreateBorderColorMenu());
+        appearanceMenu.DropDownItems.Add(DesktopWidgetStyle.CreateMenuIconMenu());
         appearanceMenu.DropDownItems.Add(_showNamesMenuItem);
         appearanceMenu.DropDownItems.Add(iconSizeMenu);
         _settingsMenu.Items.Add(appearanceMenu);
@@ -17259,6 +17711,7 @@ internal sealed class DesktopOrganizerWidgetView : Control
         var g = e.Graphics;
         g.SmoothingMode = SmoothingMode.AntiAlias;
         g.TextRenderingHint = System.Drawing.Text.TextRenderingHint.ClearTypeGridFit;
+        DesktopWidgetStyle.Use(FindForm());
         _hotspots.Clear();
         _previewAreas.Clear();
         _categoryTabAreas.Clear();
@@ -17358,11 +17811,11 @@ internal sealed class DesktopOrganizerWidgetView : Control
         DrawCategoryTabs(g, _categoryTabArea);
 
         var settings = new Rectangle(card.Right - 49, _headerRect.Y + 2, 30, 30);
-        if (_settingsIcon is not null)
+        if (DesktopWidgetStyle.MenuIconVisible && _settingsIcon is not null)
         {
             g.DrawImage(_settingsIcon, settings);
         }
-        else
+        else if (DesktopWidgetStyle.MenuIconVisible)
         {
             DrawGearIcon(g, settings, Color.FromArgb(106, 154, 255));
         }
@@ -17452,7 +17905,7 @@ internal sealed class DesktopOrganizerWidgetView : Control
         }
     }
 
-    private static void DrawCategoryTab(Graphics g, Rectangle tab, string name, int index, Color textColor)
+    private void DrawCategoryTab(Graphics g, Rectangle tab, string name, int index, Color textColor)
     {
         var textSize = TextRenderer.MeasureText(name, HeaderFont);
         var textY = tab.Y + Math.Max(0, (tab.Height - textSize.Height) / 2);
@@ -17941,7 +18394,7 @@ internal sealed class DesktopOrganizerWidgetView : Control
         _hotspots.Add((_resizeRect, "resize"));
     }
 
-    private static void DrawButton(Graphics g, Rectangle rect, string text, Color fill, Color color, bool check)
+    private void DrawButton(Graphics g, Rectangle rect, string text, Color fill, Color color, bool check)
     {
         FillRound(g, rect, fill, 5);
         var icon = new Rectangle(rect.X + Math.Max(18, rect.Width / 2 - 56), rect.Y + 11, 15, 15);
@@ -17997,7 +18450,7 @@ internal sealed class DesktopOrganizerWidgetView : Control
     {
         var name = GetDisplayName(path);
         var showName = _config.DesktopOrganizerShowNames;
-        var labelHeight = showName ? (selected ? 22 : 18) : 0;
+        var labelHeight = showName ? (selected ? 26 : 22) : 0;
         var labelGap = showName ? (selected ? 8 : 4) : 0;
         var iconFramePadding = selected ? 22 : 0;
         var maxIconSize = Math.Min(MaxOrganizerIconSize, Math.Min(tile.Width - 12 - iconFramePadding, tile.Height - 12 - labelHeight - labelGap - iconFramePadding));
@@ -18017,7 +18470,11 @@ internal sealed class DesktopOrganizerWidgetView : Control
         var shellIcon = GetShellIcon(path);
         if (shellIcon is not null)
         {
-            g.DrawImage(shellIcon, icon);
+            ShellIconLoader.DrawSharp(g, shellIcon, icon);
+        }
+        else if (!_failedShellIconLoads.Contains(path))
+        {
+            DrawLoadingIcon(g, icon);
         }
         else
         {
@@ -18027,7 +18484,7 @@ internal sealed class DesktopOrganizerWidgetView : Control
 
         if (showName)
         {
-            var label = TrimDisplayName(name, 5);
+            var label = name;
             var labelTop = selected ? iconFrame.Bottom + labelGap : icon.Bottom + labelGap;
             var labelRect = new Rectangle(tile.X + 4, labelTop, tile.Width - 8, labelHeight);
             if (selected)
@@ -18039,7 +18496,7 @@ internal sealed class DesktopOrganizerWidgetView : Control
                 DrawRound(g, labelRect, Color.FromArgb(82, 232, 238, 255), labelHeight / 2);
             }
 
-            TextRenderer.DrawText(g, label, SmallFont, labelRect, TextMain, TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis | TextFormatFlags.NoPadding);
+            DrawDesktopText(g, label, SmallFont, TextMain, labelRect, TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis);
         }
     }
 
@@ -18133,16 +18590,47 @@ internal sealed class DesktopOrganizerWidgetView : Control
             return cached;
         }
 
-        var icon = ShellIconLoader.LoadLargeIcon(path);
-        if (icon is not null)
+        if (_pendingShellIconLoads.Add(path))
         {
-            _shellIconCache[path] = icon;
+            LoadOrganizerIconAsync(path);
         }
 
-        return icon;
+        return null;
     }
 
-    private static void DrawAddTile(Graphics g, Rectangle rect)
+    private async void LoadOrganizerIconAsync(string path)
+    {
+        var icon = await Task.Run(() => ShellIconLoader.LoadLargeIcon(path));
+        _pendingShellIconLoads.Remove(path);
+        if (IsDisposed)
+        {
+            icon?.Dispose();
+            return;
+        }
+
+        if (icon is not null)
+        {
+            _failedShellIconLoads.Remove(path);
+            _shellIconCache[path] = icon;
+            Invalidate();
+        }
+        else
+        {
+            _failedShellIconLoads.Add(path);
+            Invalidate();
+        }
+    }
+
+    private static void DrawLoadingIcon(Graphics g, Rectangle rect)
+    {
+        var placeholder = Rectangle.Inflate(rect, -4, -4);
+        FillRound(g, placeholder, Color.FromArgb(54, 112, 132, 158), 8);
+        using var pen = new Pen(Color.FromArgb(118, 220, 230, 242), 1.4F);
+        var center = new Point(placeholder.X + placeholder.Width / 2, placeholder.Y + placeholder.Height / 2);
+        g.DrawArc(pen, center.X - 8, center.Y - 8, 16, 16, -75, 255);
+    }
+
+    private void DrawAddTile(Graphics g, Rectangle rect)
     {
         var box = new Rectangle(rect.X + rect.Width / 2 - 16, rect.Y + 1, 32, 32);
         using (var pen = new Pen(Color.FromArgb(116, 136, 158), 1F) { DashStyle = DashStyle.Dash })
@@ -18498,14 +18986,40 @@ internal sealed class DesktopOrganizerWidgetView : Control
         return path;
     }
 
-    private static void DrawText(Graphics g, string text, Font font, Color color, int x, int y)
+    private void DrawText(Graphics g, string text, Font font, Color color, int x, int y)
     {
-        TextRenderer.DrawText(g, text, font, new Point(x, y), color, TextFormatFlags.NoPadding | TextFormatFlags.PreserveGraphicsClipping);
+        var size = Size.Ceiling(g.MeasureString(text, font));
+        DrawDesktopText(g, text, font, color, new Rectangle(x, y, size.Width + 2, size.Height + 2), TextFormatFlags.NoPadding | TextFormatFlags.PreserveGraphicsClipping);
     }
 
-    private static void DrawCentered(Graphics g, string text, Font font, Color color, Rectangle rect)
+    private void DrawCentered(Graphics g, string text, Font font, Color color, Rectangle rect)
     {
-        TextRenderer.DrawText(g, text, font, rect, color, TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis | TextFormatFlags.NoPadding | TextFormatFlags.PreserveGraphicsClipping);
+        DrawDesktopText(g, text, font, color, rect, TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis | TextFormatFlags.NoPadding | TextFormatFlags.PreserveGraphicsClipping);
+    }
+
+    private void DrawDesktopText(Graphics g, string text, Font font, Color color, Rectangle rect, TextFormatFlags flags)
+    {
+        var state = g.Save();
+        try
+        {
+            g.TextRenderingHint = System.Drawing.Text.TextRenderingHint.AntiAliasGridFit;
+            using var brush = new SolidBrush(Color.FromArgb(255, color));
+            using var format = new StringFormat(StringFormatFlags.NoWrap)
+            {
+                Alignment = flags.HasFlag(TextFormatFlags.HorizontalCenter) ? StringAlignment.Center
+                    : flags.HasFlag(TextFormatFlags.Right) ? StringAlignment.Far
+                    : StringAlignment.Near,
+                LineAlignment = flags.HasFlag(TextFormatFlags.VerticalCenter) ? StringAlignment.Center
+                    : flags.HasFlag(TextFormatFlags.Bottom) ? StringAlignment.Far
+                    : StringAlignment.Near,
+                Trimming = flags.HasFlag(TextFormatFlags.EndEllipsis) ? StringTrimming.EllipsisCharacter : StringTrimming.None
+            };
+            g.DrawString(text, font, brush, rect, format);
+        }
+        finally
+        {
+            g.Restore(state);
+        }
     }
 }
 
@@ -18769,6 +19283,8 @@ internal sealed class DesktopClipboardWidgetForm : Form
 
     public void ShowAsDesktopWidget(WidgetPlacement? placement = null)
     {
+        DesktopWidgetStyle.Register(this, placement);
+        DesktopWidgetStyle.Use(this);
         _placement = placement;
         SetPositionLocked(placement?.Locked == true, save: false);
         SetTopMostMode(placement?.TopMost == true, save: false);
@@ -18929,11 +19445,15 @@ internal sealed class DesktopClipboardWidgetForm : Form
 
     private void ApplyWidgetSkin()
     {
-        BackColor = Color.FromArgb(20, 28, 40);
+        DesktopWidgetStyle.Use(this);
+        var fullyTransparent = _transparent && DesktopWidgetStyle.OpacityPercent == 0;
+        BackColor = fullyTransparent ? Color.Black : Color.FromArgb(20, 28, 40);
         _view.BackColor = BackColor;
         if (IsHandleCreated)
         {
-            NativeGlass.EnableAcrylic(Handle, _transparent ? DesktopWidgetStyle.WindowTint : Color.FromArgb(232, 18, 26, 38));
+            NativeGlass.EnableAcrylic(Handle, fullyTransparent
+                ? Color.Transparent
+                : _transparent ? DesktopWidgetStyle.WindowTint : Color.FromArgb(232, 18, 26, 38));
         }
 
         _view.Invalidate();
@@ -19357,6 +19877,8 @@ internal sealed class DesktopClipboardWidgetView : Control
         var opacityMenu = DesktopWidgetStyle.CreateOpacityMenu();
         SetMenuIcon(opacityMenu, "zicaidan", "4-4.png");
         appearanceMenu.DropDownItems.Add(opacityMenu);
+        appearanceMenu.DropDownItems.Add(DesktopWidgetStyle.CreateBorderColorMenu());
+        appearanceMenu.DropDownItems.Add(DesktopWidgetStyle.CreateMenuIconMenu());
         _menu.Items.Add(appearanceMenu);
         _menu.Items.Add(new ToolStripSeparator());
         var settingsMenuItem = _menu.Items.Add("剪贴板管理", null, (_, _) => ManageRequested?.Invoke());
@@ -19674,6 +20196,7 @@ internal sealed class DesktopClipboardWidgetView : Control
         var g = e.Graphics;
         g.SmoothingMode = SmoothingMode.AntiAlias;
         g.TextRenderingHint = System.Drawing.Text.TextRenderingHint.ClearTypeGridFit;
+        DesktopWidgetStyle.Use(FindForm());
         _itemAreas.Clear();
         var card = new Rectangle(0, 0, Width - 1, Height - 1);
         if (card.Width < 220 || card.Height < 52)
@@ -19706,15 +20229,15 @@ internal sealed class DesktopClipboardWidgetView : Control
             g.DrawImage(_titleIcon, new Rectangle(card.X + 16, card.Y + 18, 20, 20));
         }
 
-        TextRenderer.DrawText(g, "剪贴板", TitleFont, new Rectangle(card.X + 44, card.Y + 12, card.Width - 104, 32), TextMain, TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis);
+        DesktopWidgetStyle.DrawClearText(g, "剪贴板", TitleFont, new Rectangle(card.X + 44, card.Y + 12, card.Width - 104, 32), TextMain, TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis);
         _settingsRect = new Rectangle(card.Right - 42, card.Y + 14, 28, 28);
         _topMostRect = new Rectangle(_settingsRect.Left - 34, card.Y + 14, 28, 28);
         DrawTopMostButton(g, _topMostRect);
-        if (_settingsIcon is not null)
+        if (DesktopWidgetStyle.MenuIconVisible && _settingsIcon is not null)
         {
             g.DrawImage(_settingsIcon, _settingsRect);
         }
-        else
+        else if (DesktopWidgetStyle.MenuIconVisible)
         {
             DrawGear(g, _settingsRect, TextMuted);
         }
@@ -19745,7 +20268,7 @@ internal sealed class DesktopClipboardWidgetView : Control
     {
         if (_clipboard.Items.Count == 0)
         {
-            TextRenderer.DrawText(g, "暂无剪贴板记录", NormalFont, area, TextMuted, TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis);
+            DesktopWidgetStyle.DrawClearText(g, "暂无剪贴板记录", NormalFont, area, TextMuted, TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis);
             return;
         }
 
@@ -19772,13 +20295,13 @@ internal sealed class DesktopClipboardWidgetView : Control
                 g.FillPath(badgeBrush, badgePath);
             }
 
-            TextRenderer.DrawText(g, item.Kind == ClipboardHistoryKind.Image ? "图片" : "文字", BadgeFont, badge, Color.White, TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter | TextFormatFlags.SingleLine | TextFormatFlags.NoPadding);
-            TextRenderer.DrawText(g, item.CreatedAt.ToString("HH:mm:ss"), SmallFont, new Rectangle(row.Right - 78, row.Y + 12, 68, 22), selected ? Color.White : TextMuted, TextFormatFlags.Right | TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis);
-            TextRenderer.DrawText(g, ClipboardSummary(item), NormalFont, new Rectangle(row.X + 70, row.Y + 10, Math.Max(1, row.Width - 158), 26), selected ? Color.White : TextMain, TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis);
+            DesktopWidgetStyle.DrawClearText(g, item.Kind == ClipboardHistoryKind.Image ? "图片" : "文字", BadgeFont, badge, Color.White, TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter | TextFormatFlags.SingleLine | TextFormatFlags.NoPadding);
+            DesktopWidgetStyle.DrawClearText(g, item.CreatedAt.ToString("HH:mm:ss"), SmallFont, new Rectangle(row.Right - 78, row.Y + 12, 68, 22), selected ? Color.White : TextMain, TextFormatFlags.Right | TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis);
+            DesktopWidgetStyle.DrawClearText(g, ClipboardSummary(item), NormalFont, new Rectangle(row.X + 70, row.Y + 10, Math.Max(1, row.Width - 158), 26), selected ? Color.White : TextMain, TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis);
             if (item.IsPinned || item.IsLocked)
             {
                 var stateText = item.IsPinned && item.IsLocked ? "置顶 锁定" : item.IsPinned ? "置顶" : "锁定";
-                TextRenderer.DrawText(g, stateText, SmallFont, new Rectangle(row.X + 70, row.Y + 32, Math.Max(1, row.Width - 158), 18), TextMuted, TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis);
+                DesktopWidgetStyle.DrawClearText(g, stateText, SmallFont, new Rectangle(row.X + 70, row.Y + 32, Math.Max(1, row.Width - 158), 18), TextMuted, TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis);
             }
             _itemAreas.Add((row, item));
         }
@@ -20653,6 +21176,8 @@ internal sealed class DesktopSearchWidgetForm : Form
         var appearanceMenu = new ToolStripMenuItem("外观设置");
         SetMenuIcon(appearanceMenu, "zicaidan", "4.png");
         appearanceMenu.DropDownItems.Add(DesktopWidgetStyle.CreateOpacityMenu());
+        appearanceMenu.DropDownItems.Add(DesktopWidgetStyle.CreateBorderColorMenu());
+        appearanceMenu.DropDownItems.Add(DesktopWidgetStyle.CreateMenuIconMenu());
         _menu.Items.Add(appearanceMenu);
         _menu.Items.Add(new ToolStripSeparator());
         var settingsMenuItem = _menu.Items.Add("设置中心", null, (_, _) => _manageRequested());
@@ -20767,6 +21292,8 @@ internal sealed class DesktopSearchWidgetForm : Form
 
     public void ShowAsDesktopWidget(WidgetPlacement? placement = null)
     {
+        DesktopWidgetStyle.Register(this, placement);
+        DesktopWidgetStyle.Use(this);
         _placement = placement;
         SetPositionLocked(placement?.Locked == true, save: false);
         var work = Screen.PrimaryScreen?.WorkingArea ?? new Rectangle(80, 80, 1280, 720);
@@ -21050,6 +21577,7 @@ internal sealed class DesktopSearchWidgetForm : Form
     protected override void OnPaint(PaintEventArgs e)
     {
         base.OnPaint(e);
+        DesktopWidgetStyle.Use(this);
         var g = e.Graphics;
         g.SmoothingMode = SmoothingMode.AntiAlias;
         _capsuleRect = new Rectangle(ShadowInset, 8, Math.Max(1, Width - ShadowInset * 2), CapsuleHeight);
@@ -21614,6 +22142,15 @@ internal sealed class SettingsPageCanvas : Control
         _versionScrollOffset = Math.Max(0, _versionScrollOffset);
         var y = content.Y - _versionScrollOffset;
 
+        DrawVersionSection(g, content, "1.8.1 更新记录", new[]
+        {
+            "桌面组件支持独立设置透明度、边框颜色和菜单图标自动隐藏，0% 透明度仅保留边框、文字与图标。",
+            "统一桌面收纳、快捷启动、工作记录、项目管理、系统检测和剪贴板的透明背景与文字渲染效果。",
+            "优化软件图标异步加载和高清绘制，加载期间不再显示误导性的文字图标，并减少首次启动卡顿。",
+            "开机启动改为真正的后台隐藏启动，桌面组件完成首帧后统一显示，降低闪屏和逐个出现的问题。",
+            "修复设置中心组件复选框状态不同步、搜索框颜色异常、便签标题编辑异常及日期文字颜色不一致。",
+            "快捷启动顶部栏支持右键唤醒，并在 5 秒无操作后自动隐藏。"
+        }, content.X, ref y, content.Width);
         DrawVersionSection(g, content, "1.8.0 更新记录", new[]
         {
             "重构桌面收纳文件移动逻辑，移动失败时不再复制后删除源文件，避免文件夹内容丢失。",
@@ -21925,6 +22462,7 @@ internal sealed class SettingsPageCanvas : Control
         {
             var widgetKey = key[7..];
             WidgetChanged?.Invoke(widgetKey, !WidgetVisible(widgetKey));
+            Invalidate();
         }
         else if (key?.StartsWith("hot_", StringComparison.Ordinal) == true)
         {
@@ -23710,7 +24248,7 @@ internal sealed class DesktopPageCanvas : Control
         var shellIcon = GetShellIcon(path);
         if (shellIcon is not null)
         {
-            g.DrawImage(shellIcon, icon);
+            ShellIconLoader.DrawSharp(g, shellIcon, icon);
         }
         else
         {
@@ -25226,6 +25764,8 @@ internal sealed class DashboardCanvas : Control
     private readonly Dictionary<DeskCategory, int> _desktopPreviewScrollOffsets = new();
     private readonly Dictionary<string, Image> _launcherIconCache = new(StringComparer.OrdinalIgnoreCase);
     private readonly Dictionary<string, Image> _desktopIconCache = new(StringComparer.OrdinalIgnoreCase);
+    private readonly HashSet<string> _pendingLauncherIconLoads = new(StringComparer.OrdinalIgnoreCase);
+    private readonly HashSet<string> _pendingDesktopIconLoads = new(StringComparer.OrdinalIgnoreCase);
     private DeskCategory? _dragDesktopCategory;
     private Rectangle _dragDesktopArea;
     private int _dragDesktopStartX;
@@ -25965,10 +26505,10 @@ internal sealed class DashboardCanvas : Control
     private void DrawLauncherTile(Graphics g, Rectangle rect, LaunchItem item, string key)
     {
         var icon = new Rectangle(rect.X + rect.Width / 2 - 17, rect.Y + 8, 34, 34);
-        var shellIcon = GetLauncherIcon(item.Path, _launcherIconCache);
+        var shellIcon = GetLauncherIcon(item.Path, _launcherIconCache, _pendingLauncherIconLoads);
         if (shellIcon is not null)
         {
-            g.DrawImage(shellIcon, icon);
+            ShellIconLoader.DrawSharp(g, shellIcon, icon);
         }
         else
         {
@@ -25980,7 +26520,7 @@ internal sealed class DashboardCanvas : Control
         _hotspots.Add((rect, key));
     }
 
-    private static Image? GetLauncherIcon(string path, Dictionary<string, Image> cache)
+    private Image? GetLauncherIcon(string path, Dictionary<string, Image> cache, HashSet<string> pending)
     {
         if (string.IsNullOrWhiteSpace(path))
         {
@@ -25992,13 +26532,29 @@ internal sealed class DashboardCanvas : Control
             return cached;
         }
 
-        var icon = ShellIconLoader.LoadLargeIcon(path);
+        if (pending.Add(path))
+        {
+            LoadDashboardIconAsync(path, cache, pending);
+        }
+
+        return null;
+    }
+
+    private async void LoadDashboardIconAsync(string path, Dictionary<string, Image> cache, HashSet<string> pending)
+    {
+        var icon = await Task.Run(() => ShellIconLoader.LoadLargeIcon(path));
+        pending.Remove(path);
+        if (IsDisposed)
+        {
+            icon?.Dispose();
+            return;
+        }
+
         if (icon is not null)
         {
             cache[path] = icon;
+            Invalidate();
         }
-
-        return icon;
     }
 
     private void DrawAppIcon(Graphics g, Rectangle rect, string name)
@@ -26011,10 +26567,10 @@ internal sealed class DashboardCanvas : Control
     private void DrawDesktopPreviewIcon(Graphics g, Rectangle rect, string path)
     {
         var icon = new Rectangle(rect.X + rect.Width / 2 - 16, rect.Y + rect.Height / 2 - 16, 32, 32);
-        var shellIcon = GetLauncherIcon(path, _desktopIconCache);
+        var shellIcon = GetLauncherIcon(path, _desktopIconCache, _pendingDesktopIconLoads);
         if (shellIcon is not null)
         {
-            g.DrawImage(shellIcon, icon);
+            ShellIconLoader.DrawSharp(g, shellIcon, icon);
             return;
         }
 
@@ -26269,6 +26825,35 @@ internal static class ShellIconLoader
     private const string AppxManifestFileName = "AppxManifest.xml";
     private const int ErrorSuccess = 0;
     private const int ErrorInsufficientBuffer = 122;
+
+    public static void DrawSharp(Graphics graphics, Image image, Rectangle destination)
+    {
+        var state = graphics.Save();
+        try
+        {
+            graphics.CompositingMode = CompositingMode.SourceOver;
+            graphics.CompositingQuality = CompositingQuality.HighQuality;
+            graphics.InterpolationMode = image.Width == destination.Width && image.Height == destination.Height
+                ? InterpolationMode.NearestNeighbor
+                : InterpolationMode.HighQualityBicubic;
+            graphics.PixelOffsetMode = PixelOffsetMode.HighQuality;
+            using var attributes = new System.Drawing.Imaging.ImageAttributes();
+            attributes.SetWrapMode(System.Drawing.Drawing2D.WrapMode.TileFlipXY);
+            graphics.DrawImage(
+                image,
+                destination,
+                0,
+                0,
+                image.Width,
+                image.Height,
+                GraphicsUnit.Pixel,
+                attributes);
+        }
+        finally
+        {
+            graphics.Restore(state);
+        }
+    }
 
     private static Bitmap HIconToBitmap(IntPtr hIcon, int size)
     {
