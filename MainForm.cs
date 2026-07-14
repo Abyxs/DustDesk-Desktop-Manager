@@ -14875,7 +14875,64 @@ internal static class DesktopOrganizerStorage
 
     public static bool RemoveDesktopDuplicateOrganizerReferences(AppConfig config)
     {
-        return false;
+        var desktopNames = GetDesktopEntryNames();
+        if (desktopNames.Count == 0)
+        {
+            return false;
+        }
+
+        var changed = false;
+        foreach (var category in config.DesktopCategories)
+        {
+            var toRemove = new List<string>();
+            foreach (var itemPath in category.ItemPaths)
+            {
+                if (string.IsNullOrWhiteSpace(itemPath))
+                {
+                    continue;
+                }
+
+                var fileName = Path.GetFileName(itemPath);
+                if (string.IsNullOrWhiteSpace(fileName) || !desktopNames.Contains(fileName))
+                {
+                    continue;
+                }
+
+                toRemove.Add(itemPath);
+            }
+
+            foreach (var path in toRemove)
+            {
+                category.ItemPaths.Remove(path);
+                changed = true;
+
+                try
+                {
+                    if (File.Exists(path))
+                    {
+                        File.Delete(path);
+                    }
+                    else if (Directory.Exists(path))
+                    {
+                        Directory.Delete(path, recursive: true);
+                    }
+                }
+                catch
+                {
+                }
+            }
+
+            if (toRemove.Count > 0)
+            {
+                var categoryDir = Path.GetDirectoryName(toRemove[0]);
+                if (!string.IsNullOrWhiteSpace(categoryDir))
+                {
+                    TryDeleteEmptyDirectory(categoryDir);
+                }
+            }
+        }
+
+        return changed;
     }
 
     public static void RemoveOrganizerReferences(AppConfig config, params string?[] paths)
