@@ -850,6 +850,12 @@ public sealed class MainForm : Form
 
     private void HandleDesktopWidgetOpacityChanged()
     {
+        if (DesktopWidgetStyle.HasCurrentAppearance)
+        {
+            _store.SaveConfig(_config);
+            return;
+        }
+
         var opacity = DesktopWidgetStyle.OpacityPercent;
         var borderColor = DesktopWidgetStyle.BorderColorArgb;
         var autoHideMenuIcon = DesktopWidgetStyle.AutoHideMenuIcon;
@@ -8676,6 +8682,7 @@ internal static class DesktopWidgetStyle
             {
                 Timer.Stop();
                 MenuIconVisible = false;
+                Use(Form);
                 OpacityChanged?.Invoke();
             };
         }
@@ -8711,7 +8718,11 @@ internal static class DesktopWidgetStyle
     public static void Register(Form form, WidgetPlacement? placement)
     {
         if (AppearanceStates.ContainsKey(form)) return;
-        var state = new AppearanceState(form, placement ?? new WidgetPlacement());
+        var appearance = placement ?? new WidgetPlacement();
+        appearance.AppearanceOpacityPercent ??= _opacityPercent;
+        appearance.AppearanceBorderColorArgb ??= _borderColorArgb;
+        appearance.AppearanceAutoHideMenuIcon ??= _autoHideMenuIcon;
+        var state = new AppearanceState(form, appearance);
         AppearanceStates[form] = state;
         form.FormClosed += (_, _) =>
         {
@@ -8726,6 +8737,8 @@ internal static class DesktopWidgetStyle
         _currentAppearance = form is not null && AppearanceStates.TryGetValue(form, out var state) ? state : null;
     }
 
+    public static bool HasCurrentAppearance => _currentAppearance is not null;
+
     public static Color WindowTint => Color.FromArgb(Math.Min(95, CardAlpha), 20, 28, 40);
     public static Color CardFill => Color.FromArgb(CardAlpha, 18, 26, 38);
     public static Color ContentFill => Color.FromArgb(ContentAlpha, 24, 34, 48);
@@ -8733,7 +8746,7 @@ internal static class DesktopWidgetStyle
     {
         get
         {
-            var color = Color.FromArgb(_borderColorArgb);
+            var color = Color.FromArgb(BorderColorArgb);
             return color.A == 0 ? Color.Transparent : Color.FromArgb(220, color.R, color.G, color.B);
         }
     }
